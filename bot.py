@@ -112,6 +112,15 @@ if not LOCKS_FILE.exists():
         # if creation fails (e.g., permission issues), proceed and helpers will handle missing file
         pass
 
+# Create user repos file if it doesn't exist
+if not USER_REPOS_FILE.exists() or not USER_REPOS_FILE.is_file():
+    try:
+        USER_REPOS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        USER_REPOS_FILE.write_text(json.dumps({}))
+    except Exception:
+        # if creation fails (e.g., permission issues), proceed and helpers will handle missing file
+        pass
+
 
 def load_locks():
     try:
@@ -134,7 +143,8 @@ def save_locks(locks: dict):
 
 def load_user_repos() -> dict:
     try:
-        if USER_REPOS_FILE.exists():
+        # Check if the path exists and is a file (not a directory)
+        if USER_REPOS_FILE.exists() and USER_REPOS_FILE.is_file():
             return json.loads(USER_REPOS_FILE.read_text())
     except Exception:
         logging.exception("Failed to load user repos file")
@@ -158,6 +168,8 @@ def _mask_repo_url(url: str) -> str:
 
 def save_user_repos(m: dict):
     try:
+        # Ensure parent directory exists before writing
+        USER_REPOS_FILE.parent.mkdir(parents=True, exist_ok=True)
         USER_REPOS_FILE.write_text(json.dumps(m, ensure_ascii=False, indent=2))
     except Exception:
         logging.exception("Failed to save user repos file")
