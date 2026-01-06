@@ -51,9 +51,6 @@ if not TOKEN:
     logging.error("BOT_TOKEN not provided via environment. Set BOT_TOKEN before starting the bot.")
     raise SystemExit("BOT_TOKEN environment variable is required")
 
-# Initialize aiogram availability flag
-AIORGRAM_AVAILABLE = True
-
 # REPO_PATH can be configured with env var REPO_PATH; default to local ./repo for local runs
 REPO_PATH = Path(os.getenv("REPO_PATH", "repo"))
 # Per-user repos base dir
@@ -389,60 +386,30 @@ def get_lfs_lock_info(doc_rel_path: str, cwd: Path = REPO_PATH):
         return None
     return None
 
-try:
-    from aiogram import Bot, Dispatcher
-    bot = Bot(token=TOKEN)
-    dp = Dispatcher()
-except ImportError:
-    # aiogram not installed, fall back to lightweight stubs
-    logging.warning("aiogram not available. Falling back to stubs for test/runtime safety.")
-    AIORGRAM_AVAILABLE = False
+# Initialize stub bot since we're using python-telegram-bot as the main library
+AIORGRAM_AVAILABLE = False
 
-    class _StubBot:
-        def __init__(self, token=None):
-            self.token = token
+# Define stub bot classes for compatibility
+class _StubBot:
+    def __init__(self, token=None):
+        self.token = token
 
-        async def send_message(self, chat_id, text, **kwargs):
-            # Stub: include repo header in logged message for test/runtime visibility
-            logging.info("Stub send_message to %s: %s", chat_id, str(text))
-            return None
+    async def send_message(self, chat_id, text, **kwargs):
+        # Stub: include repo header in logged message for test/runtime visibility
+        logging.info("Stub send_message to %s: %s", chat_id, str(text))
+        return None
 
-        async def send_document(self, *args, **kwargs):
-            return None
+    async def send_document(self, *args, **kwargs):
+        return None
 
-    class _StubDispatcher:
-        def message(self, *args, **kwargs):
-            def decorator(f):
-                return f
-            return decorator
+class _StubDispatcher:
+    def message(self, *args, **kwargs):
+        def decorator(f):
+            return f
+        return decorator
 
-    bot = _StubBot(token=TOKEN)
-    dp = _StubDispatcher()
-except Exception as e:
-    # If aiogram is present but token is invalid (or other init error), fall back to lightweight stubs
-    logging.warning("Failed to initialize aiogram Bot/Dispatcher (%s). Falling back to stubs for test/runtime safety.", e)
-    AIORGRAM_AVAILABLE = False
-
-    class _StubBot:
-        def __init__(self, token=None):
-            self.token = token
-
-        async def send_message(self, chat_id, text, **kwargs):
-            # Stub: include repo header in logged message for test/runtime visibility
-            logging.info("Stub send_message to %s: %s", chat_id, str(text))
-            return None
-
-        async def send_document(self, *args, **kwargs):
-            return None
-
-    class _StubDispatcher:
-        def message(self, *args, **kwargs):
-            def decorator(f):
-                return f
-            return decorator
-
-    bot = _StubBot(token=TOKEN)
-    dp = _StubDispatcher()
+bot = _StubBot(token=TOKEN)
+dp = _StubDispatcher()
 
 # Global variable to track per-user selection and intent
 # user_doc_sessions[user_id] = { 'doc': 'name.docx', 'action': 'download' }
@@ -2190,6 +2157,7 @@ async def main():
     use_ptb = os.getenv("USE_PTB", "true").lower() in ("1", "true", "yes") and PTB_AVAILABLE
     if use_ptb:
         # Register PTB handlers and run application
+        # Create and configure the application
         app = ApplicationBuilder().token(TOKEN).build()
 
         # Command/start
@@ -2324,29 +2292,9 @@ async def main():
         app.add_handler(MessageHandler(filters.Document.ALL, document_router))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
-        # Run PTB in a separate thread to avoid event loop conflicts
-        def run_ptb_app():
-            # Create a new event loop for the PTB application
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-            async def start_app():
-                async with app:
-                    await app.run_polling()
-            
-            loop.run_until_complete(start_app())
-        
-        # Run the PTB application in a separate thread
-        import threading
-        ptb_thread = threading.Thread(target=run_ptb_app, daemon=True)
-        ptb_thread.start()
-        
-        # Keep the main thread alive
-        try:
-            while ptb_thread.is_alive():
-                ptb_thread.join(timeout=1)
-        except KeyboardInterrupt:
-            pass
+        # Run the application with proper configuration to avoid signal handler conflicts
+        async with app:
+            await app.run_polling(drop_pending_updates=True)
         return
 
 if __name__ == "__main__":
