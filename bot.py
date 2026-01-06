@@ -51,6 +51,9 @@ if not TOKEN:
     logging.error("BOT_TOKEN not provided via environment. Set BOT_TOKEN before starting the bot.")
     raise SystemExit("BOT_TOKEN environment variable is required")
 
+# Initialize aiogram availability flag
+AIORGRAM_AVAILABLE = True
+
 # REPO_PATH can be configured with env var REPO_PATH; default to local ./repo for local runs
 REPO_PATH = Path(os.getenv("REPO_PATH", "repo"))
 # Per-user repos base dir
@@ -387,8 +390,34 @@ def get_lfs_lock_info(doc_rel_path: str, cwd: Path = REPO_PATH):
     return None
 
 try:
+    from aiogram import Bot, Dispatcher
     bot = Bot(token=TOKEN)
     dp = Dispatcher()
+except ImportError:
+    # aiogram not installed, fall back to lightweight stubs
+    logging.warning("aiogram not available. Falling back to stubs for test/runtime safety.")
+    AIORGRAM_AVAILABLE = False
+
+    class _StubBot:
+        def __init__(self, token=None):
+            self.token = token
+
+        async def send_message(self, chat_id, text, **kwargs):
+            # Stub: include repo header in logged message for test/runtime visibility
+            logging.info("Stub send_message to %s: %s", chat_id, str(text))
+            return None
+
+        async def send_document(self, *args, **kwargs):
+            return None
+
+    class _StubDispatcher:
+        def message(self, *args, **kwargs):
+            def decorator(f):
+                return f
+            return decorator
+
+    bot = _StubBot(token=TOKEN)
+    dp = _StubDispatcher()
 except Exception as e:
     # If aiogram is present but token is invalid (or other init error), fall back to lightweight stubs
     logging.warning("Failed to initialize aiogram Bot/Dispatcher (%s). Falling back to stubs for test/runtime safety.", e)
@@ -2296,17 +2325,9 @@ async def main():
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
         try:
-            # Run the blocking PTB polling call in a thread executor so we don't
-            # attempt to close or re-create the running asyncio event loop.
-            # The PTB polling expects an event loop to be present in the thread,
-            # so create and set one explicitly before calling run_polling.
-            def _run_app_polling():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                app.run_polling()
-
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, _run_app_polling)
+            # Run PTB polling directly in the main thread
+            # This avoids the "set_wakeup_fd only works in main thread" error
+            await app.run_polling()
         except Exception as e:
             logging.error(f"PTB polling failed: {e}")
         return
