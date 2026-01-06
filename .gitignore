@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.git/modules/
+.pytest_cache/
+.pytest_cache/*
+.pytest_cache/**/*
+
+# Environment
+.env
+.env.local
+.env.dev
+.env.prod
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project specific
+locks.json
+user_repos.json
+user_repos/
+*.log
+
+# SSH keys
+ssh/id_*
+.repo/.ssh/
+.repo/ssh/
+*.pem
+*.key

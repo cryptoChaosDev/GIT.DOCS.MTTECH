@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  git-docs-bot:
+    build: .
+    container_name: git-docs-bot
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_IDS=${ADMIN_IDS}
+      - REPO_PATH=/app/repo
+      - USER_REPOS_DIR=/app/user_repos
+      - LOGS_DIR=/app/logs
+      - AUTO_UNLOCK_ON_UPLOAD=${AUTO_UNLOCK_ON_UPLOAD:-false}
+    volumes:
+      - ./user_repos:/app/user_repos
+      - ./logs:/app/logs
+      - ./locks.json:/app/locks.json
+      - ./user_repos.json:/app/user_repos.json
+    restart: unless-stopped
+    networks:
+      - gitdocs_network
+
+networks:
+  gitdocs_network:
+    driver: bridge
