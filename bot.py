@@ -2324,12 +2324,13 @@ async def main():
         app.add_handler(MessageHandler(filters.Document.ALL, document_router))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
+        # Initialize and run the application properly
+        await app.initialize()
         try:
-            # Run PTB polling directly in the main thread
-            # This avoids the "set_wakeup_fd only works in main thread" error
+            await app.start()
             await app.run_polling()
-        except Exception as e:
-            logging.error(f"PTB polling failed: {e}")
+        finally:
+            await app.stop()
         return
 
 if __name__ == "__main__":
