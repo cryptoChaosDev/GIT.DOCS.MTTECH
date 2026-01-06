@@ -116,11 +116,11 @@ if not LOCKS_FILE.exists():
 if not USER_REPOS_FILE.exists() or not USER_REPOS_FILE.is_file():
     try:
         USER_REPOS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        # If the path exists but is a directory, remove it first
+        # If the path exists but is a directory (e.g., due to Docker volume mount), we can't safely remove it
         if USER_REPOS_FILE.exists() and USER_REPOS_FILE.is_dir():
-            import shutil
-            shutil.rmtree(USER_REPOS_FILE)
-        USER_REPOS_FILE.write_text(json.dumps({}))
+            logging.warning(f"USER_REPOS_FILE path exists as directory, cannot create as file: {USER_REPOS_FILE}")
+        else:
+            USER_REPOS_FILE.write_text(json.dumps({}))
     except Exception:
         # if creation fails (e.g., permission issues), proceed and helpers will handle missing file
         pass
@@ -152,10 +152,9 @@ def load_user_repos() -> dict:
             if USER_REPOS_FILE.is_file():
                 return json.loads(USER_REPOS_FILE.read_text())
             else:
-                # Path exists but is a directory - remove it and create as file
-                import shutil
-                shutil.rmtree(USER_REPOS_FILE)
-                USER_REPOS_FILE.write_text(json.dumps({}))
+                # Path exists but is a directory (likely due to Docker volume mount when file didn't exist)
+                # Return empty dict since we can't safely remove a mounted directory
+                logging.warning(f"USER_REPOS_FILE path exists as directory: {USER_REPOS_FILE}. This may be due to Docker volume mounting behavior.")
                 return {}
     except Exception:
         logging.exception("Failed to load user repos file")
@@ -181,10 +180,10 @@ def save_user_repos(m: dict):
     try:
         # Ensure parent directory exists before writing
         USER_REPOS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        # If the path exists but is a directory, remove it first
+        # If the path exists but is a directory (e.g., due to Docker volume mount), we can't safely remove it
         if USER_REPOS_FILE.exists() and USER_REPOS_FILE.is_dir():
-            import shutil
-            shutil.rmtree(USER_REPOS_FILE)
+            logging.warning(f"Cannot save to USER_REPOS_FILE: path exists as directory: {USER_REPOS_FILE}")
+            return
         USER_REPOS_FILE.write_text(json.dumps(m, ensure_ascii=False, indent=2))
     except Exception:
         logging.exception("Failed to save user repos file")
