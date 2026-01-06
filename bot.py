@@ -116,6 +116,10 @@ if not LOCKS_FILE.exists():
 if not USER_REPOS_FILE.exists() or not USER_REPOS_FILE.is_file():
     try:
         USER_REPOS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # If the path exists but is a directory, remove it first
+        if USER_REPOS_FILE.exists() and USER_REPOS_FILE.is_dir():
+            import shutil
+            shutil.rmtree(USER_REPOS_FILE)
         USER_REPOS_FILE.write_text(json.dumps({}))
     except Exception:
         # if creation fails (e.g., permission issues), proceed and helpers will handle missing file
@@ -144,8 +148,15 @@ def save_locks(locks: dict):
 def load_user_repos() -> dict:
     try:
         # Check if the path exists and is a file (not a directory)
-        if USER_REPOS_FILE.exists() and USER_REPOS_FILE.is_file():
-            return json.loads(USER_REPOS_FILE.read_text())
+        if USER_REPOS_FILE.exists():
+            if USER_REPOS_FILE.is_file():
+                return json.loads(USER_REPOS_FILE.read_text())
+            else:
+                # Path exists but is a directory - remove it and create as file
+                import shutil
+                shutil.rmtree(USER_REPOS_FILE)
+                USER_REPOS_FILE.write_text(json.dumps({}))
+                return {}
     except Exception:
         logging.exception("Failed to load user repos file")
     return {}
@@ -170,6 +181,10 @@ def save_user_repos(m: dict):
     try:
         # Ensure parent directory exists before writing
         USER_REPOS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # If the path exists but is a directory, remove it first
+        if USER_REPOS_FILE.exists() and USER_REPOS_FILE.is_dir():
+            import shutil
+            shutil.rmtree(USER_REPOS_FILE)
         USER_REPOS_FILE.write_text(json.dumps(m, ensure_ascii=False, indent=2))
     except Exception:
         logging.exception("Failed to save user repos file")
