@@ -2292,9 +2292,17 @@ async def main():
         app.add_handler(MessageHandler(filters.Document.ALL, document_router))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
-        # Run the application with proper configuration to avoid signal handler conflicts
-        async with app:
-            await app.run_polling(drop_pending_updates=True)
+        # Run the application properly by using run_polling as a blocking call
+        # This will handle the entire lifecycle properly
+        await app.initialize()
+        try:
+            await app.start()
+            await app.updater.start_polling(drop_pending_updates=True)
+            # Run forever - this is the main loop
+            await asyncio.Event().wait()  # Keep running indefinitely
+        finally:
+            await app.updater.stop()
+            await app.stop()
         return
 
 if __name__ == "__main__":
