@@ -2121,6 +2121,12 @@ async def handle_repo_action_simple(msg, action):
                 await msg.answer("❌ Неверный URL репозитория.", reply_markup=get_main_keyboard())
                 return
             repo_dir.parent.mkdir(parents=True, exist_ok=True)
+            
+            # If the directory exists but is not a git repo, remove it first
+            if repo_dir.exists() and not (repo_dir / '.git').exists():
+                import shutil
+                shutil.rmtree(repo_dir)
+            
             subprocess.run(["git", "clone", repo_url_with_creds, str(repo_dir)], check=True, capture_output=True)
             await msg.answer("✅ Репозиторий настроен!", reply_markup=get_main_keyboard())
         except subprocess.CalledProcessError as e:
