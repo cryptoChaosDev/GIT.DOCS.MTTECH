@@ -2324,13 +2324,29 @@ async def main():
         app.add_handler(MessageHandler(filters.Document.ALL, document_router))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
-        # Initialize and run the application properly
-        await app.initialize()
+        # Run PTB in a separate thread to avoid event loop conflicts
+        def run_ptb_app():
+            # Create a new event loop for the PTB application
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            async def start_app():
+                async with app:
+                    await app.run_polling()
+            
+            loop.run_until_complete(start_app())
+        
+        # Run the PTB application in a separate thread
+        import threading
+        ptb_thread = threading.Thread(target=run_ptb_app, daemon=True)
+        ptb_thread.start()
+        
+        # Keep the main thread alive
         try:
-            await app.start()
-            await app.run_polling()
-        finally:
-            await app.stop()
+            while ptb_thread.is_alive():
+                ptb_thread.join(timeout=1)
+        except KeyboardInterrupt:
+            pass
         return
 
 if __name__ == "__main__":
