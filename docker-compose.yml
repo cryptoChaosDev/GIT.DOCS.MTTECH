@@ -14,8 +14,7 @@ services:
     volumes:
       - ./user_repos:/app/user_repos
       - ./logs:/app/logs
-      - ./locks.json:/app/locks.json
-      - ./user_repos.json:/app/user_repos.json
+      - ./data:/app/data
     restart: unless-stopped
     networks:
       - gitdocs_network

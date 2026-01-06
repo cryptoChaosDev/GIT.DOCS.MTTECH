@@ -56,8 +56,8 @@ REPO_PATH = Path(os.getenv("REPO_PATH", "repo"))
 # Per-user repos base dir
 USER_REPOS_DIR = Path(os.getenv("USER_REPOS_DIR", "user_repos"))
 USER_REPOS_DIR.mkdir(exist_ok=True)
-USER_REPOS_FILE = Path(os.getenv("USER_REPOS_FILE", "user_repos.json"))
-LOCKS_FILE = Path(os.getenv("LOCKS_FILE", "locks.json"))
+USER_REPOS_FILE = Path(os.getenv("USER_REPOS_FILE", "/app/data/user_repos.json"))
+LOCKS_FILE = Path(os.getenv("LOCKS_FILE", "/app/data/locks.json"))
 
 # SECURITY: validate_path_safety function was removed as it was not used
 
