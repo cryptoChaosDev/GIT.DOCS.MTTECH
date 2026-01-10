@@ -1020,9 +1020,19 @@ async def handle_document_upload(message):
     # Check if file is locked by current user or unlocked
     locks = load_locks()
     lock_info = locks.get(doc_name)
-    if lock_info and str(message.from_user.id) != lock_info['user_id']:
+    
+    # Check LFS lock status
+    rel_path = str((Path('docs') / doc_name).as_posix())
+    lfs_lock_info = get_lfs_lock_info(rel_path, cwd=repo_root)
+    
+    # Check if locked by another user (either local or LFS)
+    local_locked_by_other = lock_info and str(message.from_user.id) != lock_info['user_id']
+    lfs_locked_by_other = lfs_lock_info and lfs_lock_info.get('owner') != str(message.from_user.id)
+    
+    if local_locked_by_other or lfs_locked_by_other:
+        lock_owner = lock_info['user_id'] if local_locked_by_other else lfs_lock_info.get('owner', 'unknown')
         # Show error but return to document menu
-        await message.answer(f"❌ Документ {doc_name} заблокирован другим пользователем!", reply_markup=get_document_keyboard(doc_name, is_locked=True, can_unlock=False))
+        await message.answer(f"❌ Документ {doc_name} заблокирован другим пользователем (ID: {lock_owner}). Обратитесь к владельцу блокировки для разблокировки.", reply_markup=get_document_keyboard(doc_name, is_locked=True, can_unlock=False))
         return
     
     # Download and save the document
@@ -1155,6 +1165,19 @@ async def handle_document_upload(message):
         
         # Push to remote only if commit was created
         if commit_created:
+            # Check if file is locked by LFS and unlock it temporarily if needed
+            rel_path = str((Path('docs') / doc_name).as_posix())
+            lfs_lock_info = get_lfs_lock_info(rel_path, cwd=repo_root)
+            
+            # If file is locked by current user, unlock it temporarily for push
+            if lfs_lock_info and lfs_lock_info.get('owner') == str(message.from_user.id):
+                try:
+                    subprocess.run(["git", "lfs", "unlock", rel_path], cwd=str(repo_root), check=True, capture_output=True)
+                    logging.info(f"Temporarily unlocked {doc_name} for push")
+                except subprocess.CalledProcessError:
+                    # If unlock fails, continue anyway - might not be critical
+                    pass
+            
             # Push LFS objects first
             try:
                 lfs_push_result = subprocess.run(["git", "lfs", "push", "origin", "--all"],
@@ -1167,6 +1190,16 @@ async def handle_document_upload(message):
             # Then push commits
             try:
                 subprocess.run(["git", "push"], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+                
+                # Re-lock the file after successful push if it was unlocked
+                if lfs_lock_info and lfs_lock_info.get('owner') == str(message.from_user.id):
+                    try:
+                        subprocess.run(["git", "lfs", "lock", rel_path], cwd=str(repo_root), check=True, capture_output=True)
+                        logging.info(f"Re-locked {doc_name} after push")
+                    except subprocess.CalledProcessError:
+                        # If re-lock fails, continue - file will remain unlocked
+                        pass
+                        
             except subprocess.CalledProcessError as e:
                 err_msg = (e.stderr or e.stdout or '').strip()
                 if isinstance(err_msg, bytes):
