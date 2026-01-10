@@ -126,22 +126,7 @@ if not USER_REPOS_FILE.exists() or not USER_REPOS_FILE.is_file():
         pass
 
 
-def load_locks():
-    try:
-        if LOCKS_FILE.exists():
-            return json.loads(LOCKS_FILE.read_text())
-    except Exception:
-        return {}
-    return {}
-
-
-def save_locks(locks: dict):
-    # atomic write: write to tmp then replace
-    tmp = LOCKS_FILE.with_suffix('.tmp')
-    tmp.write_text(json.dumps(locks))
-    tmp.replace(LOCKS_FILE)
-
-
+# Local lock functions removed - using Git LFS locks exclusively
 # get_repo_header function was removed as it was deprecated and unused
 
 
@@ -190,18 +175,45 @@ def save_user_repos(m: dict):
 
 
 def set_user_repo(user_id: int, repo_path: str, repo_url: str = None, username: str = None):
+    """Store user repository mapping using composite key: telegram_id:git_username"""
     m = load_user_repos()
-    m[str(user_id)] = {
+    
+    # Create composite key
+    if username:
+        composite_key = f"{user_id}:{username}"
+    else:
+        # Fallback to just user_id if no username provided
+        composite_key = str(user_id)
+    
+    m[composite_key] = {
+        'telegram_id': user_id,
+        'git_username': username,
         'repo_path': str(repo_path),
         'repo_url': repo_url,
-        'username': username
+        'created_at': datetime.now().isoformat()
     }
     save_user_repos(m)
 
 
-def get_user_repo(user_id: int):
+def get_user_repo(user_id: int, git_username: str = None):
+    """Get user repository by Telegram ID and optional Git username.
+    If git_username is provided, looks for exact match.
+    If not provided, returns first match for the user_id."""
     m = load_user_repos()
-    return m.get(str(user_id))
+    
+    if git_username:
+        # Look for exact composite key match
+        composite_key = f"{user_id}:{git_username}"
+        if composite_key in m:
+            return m[composite_key]
+        # Fallback: look for any entry with this user_id
+        
+    # Find any entry for this user_id
+    for key, repo_info in m.items():
+        if str(repo_info.get('telegram_id')) == str(user_id):
+            return repo_info
+    
+    return None
 
 
 def format_user_name(message) -> str:
@@ -403,11 +415,23 @@ def get_lfs_lock_info(doc_rel_path: str, cwd: Path = REPO_PATH):
     try:
         proc = subprocess.run(["git", "lfs", "locks"], cwd=str(cwd), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
         out = proc.stdout or ""
-        # crude search: find lines referencing the path
+        # Parse Git LFS locks output format: "path    owner    timestamp"
         for line in out.splitlines():
             if doc_rel_path in line:
-                # Return raw line for now as owner info may be in the same line
-                return {"raw": line.strip()}
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    # First part is path, second is owner
+                    path_part = parts[0]
+                    owner_part = parts[1]
+                    return {
+                        "raw": line.strip(),
+                        "path": path_part,
+                        "owner": owner_part,
+                        "timestamp": parts[2] if len(parts) > 2 else None
+                    }
+                else:
+                    # Fallback to raw parsing
+                    return {"raw": line.strip()}
     except subprocess.CalledProcessError:
         return None
     return None
@@ -466,9 +490,8 @@ class PTBMessageAdapter:
     async def answer(self, text, **kwargs):
         # Convert reply_markup if needed (function get_main_keyboard returns PTB markup when available)
         reply = kwargs.get('reply_markup')
-        # Prepend user-specific repo header when available
-        hdr = get_repo_header_for_user(self.from_user.id) if hasattr(self, 'from_user') and getattr(self.from_user, 'id', None) else ''
-        await self.context.bot.send_message(chat_id=self.chat.id, text=hdr + str(text), reply_markup=reply)
+        # Send message without automatic repo header
+        await self.context.bot.send_message(chat_id=self.chat.id, text=str(text), reply_markup=reply)
 
     async def send_document(self, document, caption=None):
         # document can be a path string or PTB InputFile
@@ -501,8 +524,8 @@ def get_main_keyboard(user_id=None):
     if not has_repo or user_id is None:
         keyboard.append(["⚙️ Настройки"])
 
-    # Always show repository info
-    keyboard.append(["ℹ️ О репозитории"])
+    # Always show repository info and instructions
+    keyboard.append(["ℹ️ О репозитории", "📖 Инструкции"])
 
     if PTB_AVAILABLE:
         return PTBReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
@@ -537,13 +560,47 @@ def get_docs_keyboard(docs, locks=None):
         return PTBReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
     return keyboard
 
-def get_document_keyboard(doc_name, is_locked=False, can_unlock=False):
-    """Меню работы с конкретным документом"""
+def get_document_keyboard(doc_name, is_locked=False, can_unlock=False, current_user_id=None, repo_root=None):
+    """Меню работы с конкретным документом
+    
+    Args:
+        doc_name: Name of the document
+        is_locked: Whether document is locked
+        can_unlock: Whether current user can unlock the document
+        current_user_id: Current user's Telegram ID (for upload permission check)
+        repo_root: Repository root path (for lock verification)
+    """
+    # Check if current user can upload (is lock owner)
+    can_upload = False
+    if is_locked and current_user_id and repo_root:
+        # Check if user is the lock owner via Git LFS
+        try:
+            rel_path = str((Path('docs') / doc_name).as_posix())
+            lfs_lock_info = get_lfs_lock_info(rel_path, cwd=repo_root)
+            if lfs_lock_info:
+                # Get user's GitHub username
+                user_repo_info = get_user_repo(current_user_id)
+                user_github_username = user_repo_info.get('git_username') if user_repo_info else None
+                
+                # Check if LFS lock owner matches user's GitHub username
+                lfs_owner = lfs_lock_info.get('owner')
+                if (lfs_owner == str(current_user_id) or 
+                    lfs_owner == user_github_username or
+                    (user_github_username and lfs_owner.lower() == user_github_username.lower())):
+                    can_upload = True
+        except Exception:
+            pass
+    
     if PTB_AVAILABLE:
-        keyboard = [
-            ["📥 Скачать", "📤 Загрузить изменения"],
-            ["🧾 Статус документа"]
-        ]
+        # Build keyboard with conditional upload button
+        keyboard = [["📥 Скачать"]]
+        
+        # Add upload button only if user can upload or document is not locked
+        if not is_locked or can_upload:
+            keyboard[0].append("📤 Загрузить изменения")
+        
+        keyboard.append(["🧾 Статус документа"])
+        
         if is_locked:
             if can_unlock:
                 keyboard.insert(1, ["🔓 Разблокировать"])
@@ -553,7 +610,11 @@ def get_document_keyboard(doc_name, is_locked=False, can_unlock=False):
         return PTBReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
     
     # Fallback structure
-    keyboard = [["📥 Скачать", "📤 Загрузить изменения"], ["🧾 Статус документа"]]
+    keyboard = [["📥 Скачать"]]
+    if not is_locked or can_upload:
+        keyboard[0].append("📤 Загрузить изменения")
+    keyboard.append(["🧾 Статус документа"])
+    
     if is_locked:
         if can_unlock:
             keyboard.insert(1, ["🔓 Разблокировать"])
@@ -721,9 +782,20 @@ async def process_password(message, state=None):
             # Use credentials in clone URL for simplicity during setup
             repo_url_with_creds = "https://" + username + ":" + password + "@" + repo_url.replace("https://", "")
             subprocess.run(["git", "clone", repo_url_with_creds, str(repo_dir)], check=True, capture_output=True)
-        # Set git config for commits in the user's repo
-        subprocess.run(["git", "config", "user.name", "GitDocsBot"], cwd=str(repo_dir), check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "bot@gitdocs.ru"], cwd=str(repo_dir), check=True, capture_output=True)
+        # Preserve existing git config or set user-specific config
+        # Only set if not already configured
+        try:
+            subprocess.run(["git", "config", "--get", "user.name"], cwd=str(repo_dir), check=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            # User name not set, use the provided username
+            subprocess.run(["git", "config", "user.name", username], cwd=str(repo_dir), check=True, capture_output=True)
+        
+        try:
+            subprocess.run(["git", "config", "--get", "user.email"], cwd=str(repo_dir), check=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            # Email not set, create from username
+            email = f"{username}@users.noreply.github.com"
+            subprocess.run(["git", "config", "user.email", email], cwd=str(repo_dir), check=True, capture_output=True)
         # Save user repo mapping
         set_user_repo(user_id, str(repo_dir), repo_url=repo_url, username=username)
         
@@ -741,9 +813,33 @@ async def process_password(message, state=None):
         else:
             doc_names = [f.name for f in docs]
             
-            # Load locks to show lock icons for locked documents
-            locks = load_locks()
-            keyboard = get_docs_keyboard(doc_names, locks=locks)
+            # Get Git LFS locks for this repository
+            git_lfs_locks = {}
+            try:
+                # Get current user's repo path
+                user_repo_path = get_repo_for_user_id(message.from_user.id)
+                if user_repo_path and user_repo_path.exists():
+                    # Get all LFS locks
+                    proc = subprocess.run(["git", "lfs", "locks"], cwd=str(user_repo_path), capture_output=True, text=True, encoding='utf-8', errors='replace')
+                    if proc.returncode == 0:
+                        for line in proc.stdout.splitlines():
+                            if line.strip():
+                                parts = line.strip().split()
+                                if len(parts) >= 3:
+                                    # Format: path owner ID
+                                    path = parts[0]
+                                    owner = parts[1]
+                                    # Extract filename from path (docs/filename.docx -> filename.docx)
+                                    if "/" in path:
+                                        filename = path.split("/")[-1]
+                                        git_lfs_locks[filename] = {"owner": owner, "id": parts[2]}
+            except Exception:
+                pass
+            
+            # Use only Git LFS locks
+            combined_locks = git_lfs_locks
+            
+            keyboard = get_docs_keyboard(doc_names, locks=combined_locks)
             await message.answer("Доступные документы:", reply_markup=keyboard)
         
         # Log repository setup
@@ -780,9 +876,45 @@ async def list_documents(message):
     
     doc_names = [f.name for f in docs]
     
-    # Load locks to show lock icons for locked documents
-    locks = load_locks()
-    keyboard = get_docs_keyboard(doc_names, locks=locks)
+    # Get Git LFS locks to show lock icons for locked documents
+    git_lfs_locks = {}
+    try:
+        user_repo_path = get_repo_for_user_id(message.from_user.id)
+        if user_repo_path and user_repo_path.exists():
+            # Debug: log repository info
+            user_repo_info = get_user_repo(message.from_user.id)
+            repo_url = user_repo_info.get('repo_url', 'unknown') if user_repo_info else 'unknown'
+            logging.info(f"User {message.from_user.id} checking locks for repo: {repo_url} at {user_repo_path}")
+            
+            # Check remote repository URL to ensure all users use the same repo
+            try:
+                remote_result = subprocess.run(["git", "remote", "get-url", "origin"], cwd=str(user_repo_path), capture_output=True, text=True, encoding='utf-8', errors='replace')
+                if remote_result.returncode == 0:
+                    remote_url = remote_result.stdout.strip()
+                    logging.info(f"User {message.from_user.id} remote URL: {remote_url}")
+                else:
+                    logging.warning(f"User {message.from_user.id} failed to get remote URL: {remote_result.stderr}")
+            except Exception as e:
+                logging.error(f"Error checking remote URL for user {message.from_user.id}: {e}")
+            
+            proc = subprocess.run(["git", "lfs", "locks"], cwd=str(user_repo_path), capture_output=True, text=True, encoding='utf-8', errors='replace')
+            logging.info(f"LFS locks command result for user {message.from_user.id}: returncode={proc.returncode}, stdout={proc.stdout[:200]}, stderr={proc.stderr[:200] if proc.stderr else 'none'}")
+            
+            if proc.returncode == 0:
+                for line in proc.stdout.splitlines():
+                    if line.strip():
+                        parts = line.strip().split()
+                        if len(parts) >= 3:
+                            path = parts[0]
+                            owner = parts[1]
+                            if "/" in path:
+                                filename = path.split("/")[-1]
+                                git_lfs_locks[filename] = {"owner": owner, "id": parts[2]}
+                                logging.info(f"Found lock: {filename} locked by {owner}")
+    except Exception as e:
+        logging.error(f"Error getting LFS locks for user {message.from_user.id}: {e}")
+    
+    keyboard = get_docs_keyboard(doc_names, locks=git_lfs_locks)
     await message.answer("Выберите документ:", reply_markup=keyboard)
 
 async def handle_doc_selection(message):
@@ -811,33 +943,38 @@ async def handle_doc_selection(message):
         await list_documents(message)
         return
     
-    # Check if file is locked
-    locks = load_locks()
-    lock_info = locks.get(doc_name)
+    # Check if file is locked via Git LFS
+    rel_path = str((Path('docs') / doc_name).as_posix())
+    try:
+        lfs_lock_info = get_lfs_lock_info(rel_path, cwd=repo_root)
+        is_locked = lfs_lock_info is not None
+    except Exception as e:
+        logging.warning(f"Failed to get LFS lock info for {doc_name}: {e}")
+        is_locked = False
     
-    if lock_info:
-        # Prefer git-lfs authoritative info when available
-        rel_path = str((Path('docs') / doc_name).as_posix())
-        try:
-            lfs_info = get_lfs_lock_info(rel_path, cwd=repo_root)
-        except Exception as e:
-            logging.warning(f"Failed to get LFS lock info for {doc_name}: {e}")
-            lfs_info = None
-        owner_label = lfs_info['raw'] if lfs_info else lock_info.get('user_id')
-
+    if is_locked:
         # Determine if current user can unlock (is owner or admin)
         try:
-            can_unlock = (str(message.from_user.id) == lock_info.get('user_id')) or (str(message.from_user.id) in ADMIN_IDS)
+            lfs_owner = lfs_lock_info.get('owner', '')
+            # Check if user is lock owner (by Telegram ID or GitHub username)
+            user_repo_info = get_user_repo(message.from_user.id)
+            user_github_username = user_repo_info.get('git_username') if user_repo_info else None
+            
+            is_lock_owner = (
+                lfs_owner == str(message.from_user.id) or
+                lfs_owner == user_github_username or
+                (user_github_username and lfs_owner.lower() == user_github_username.lower())
+            )
+            can_unlock = is_lock_owner or (str(message.from_user.id) in ADMIN_IDS)
         except Exception:
-            can_unlock = False  # Default to not being able to unlock if there's an error
-        reply_markup = get_document_keyboard(doc_name, is_locked=True, can_unlock=can_unlock)
+            can_unlock = False
+            
+        reply_markup = get_document_keyboard(doc_name, is_locked=True, can_unlock=can_unlock, 
+                                           current_user_id=message.from_user.id, repo_root=repo_root)
 
-        lfs_line = (f"\n🔎 LFS: {lfs_info['raw']}\n" if lfs_info and 'raw' in lfs_info else "\n🔎 LFS: нет информации\n")
         message_text = (
             f"📄 {doc_name}\n"
-            f"🔒 Заблокирован (локально): пользователь: {lock_info.get('user_id')}\n"
-            f"⏰ Время блокировки: {lock_info.get('timestamp')}\n"
-            f"{lfs_line}\n"
+            f"🔒 Заблокирован через Git LFS: пользователь: {lfs_lock_info.get('owner', 'unknown')}\n"
             "Вы можете скачать документ, но не сможете загрузить изменения, пока он заблокирован."
         )
         await message.answer(message_text, reply_markup=reply_markup)
@@ -878,14 +1015,34 @@ async def download_document(message):
             logging.exception("Failed to send document %s: %s", doc_name, e)
             await message.answer(f"❌ Не удалось отправить документ: {str(e)[:200]}", reply_markup=get_main_keyboard())
         # Return to document menu after download
-        locks = load_locks()
-        lock_info = locks.get(doc_name)
-        is_locked = lock_info is not None
+        # Check if document is locked via Git LFS
+        rel_path = str((Path('docs') / doc_name).as_posix())
         try:
-            can_unlock = is_locked and ((str(message.from_user.id) == lock_info.get('user_id')) or (str(message.from_user.id) in ADMIN_IDS))
-        except Exception:
-            can_unlock = False  # Default to not being able to unlock if there's an error
-        reply_markup = get_document_keyboard(doc_name, is_locked=is_locked, can_unlock=can_unlock)
+            lfs_lock_info = get_lfs_lock_info(rel_path, cwd=repo_root)
+            is_locked = lfs_lock_info is not None
+        except Exception as e:
+            logging.warning(f"Failed to get LFS lock info for {doc_name}: {e}")
+            is_locked = False
+        
+        # Check if user can unlock (is owner or admin)
+        can_unlock = False
+        if is_locked and lfs_lock_info:
+            try:
+                lfs_owner = lfs_lock_info.get('owner', '')
+                # Check if user is lock owner (by Telegram ID or GitHub username)
+                user_repo_info = get_user_repo(message.from_user.id)
+                user_github_username = user_repo_info.get('git_username') if user_repo_info else None
+                
+                is_lock_owner = (
+                    lfs_owner == str(message.from_user.id) or
+                    lfs_owner == user_github_username or
+                    (user_github_username and lfs_owner.lower() == user_github_username.lower())
+                )
+                can_unlock = is_lock_owner or (str(message.from_user.id) in ADMIN_IDS)
+            except Exception:
+                can_unlock = False
+        reply_markup = get_document_keyboard(doc_name, is_locked=is_locked, can_unlock=can_unlock,
+                                           current_user_id=message.from_user.id, repo_root=repo_root)
         await message.answer("✅ Документ отправлен!", reply_markup=reply_markup)
         # Log document download
         user_name = format_user_name(message)
@@ -1017,22 +1174,71 @@ async def handle_document_upload(message):
     
     doc_path = repo_root / "docs" / doc_name
     
-    # Check if file is locked by current user or unlocked
-    locks = load_locks()
-    lock_info = locks.get(doc_name)
-    
-    # Check LFS lock status
+    # Check LFS lock status (Git LFS is now the only lock mechanism)
     rel_path = str((Path('docs') / doc_name).as_posix())
     lfs_lock_info = get_lfs_lock_info(rel_path, cwd=repo_root)
     
-    # Check if locked by another user (either local or LFS)
-    local_locked_by_other = lock_info and str(message.from_user.id) != lock_info['user_id']
-    lfs_locked_by_other = lfs_lock_info and lfs_lock_info.get('owner') != str(message.from_user.id)
+    # Check if locked by another user
+    lfs_locked_by_other = False
+    if lfs_lock_info:
+        # Get user's GitHub username for ownership check
+        user_repo_info = get_user_repo(message.from_user.id)
+        user_github_username = user_repo_info.get('git_username') if user_repo_info else None
+        
+        lfs_lock_owner = lfs_lock_info.get('owner', '')
+        
+        # Check if current user owns the lock (either by Telegram ID or GitHub username)
+        is_lock_owner = (
+            lfs_lock_owner == str(message.from_user.id) or
+            lfs_lock_owner == user_github_username or
+            (user_github_username and lfs_lock_owner.lower() == user_github_username.lower())
+        )
+        
+        if not is_lock_owner:
+            lfs_locked_by_other = True
     
-    if local_locked_by_other or lfs_locked_by_other:
-        lock_owner = lock_info['user_id'] if local_locked_by_other else lfs_lock_info.get('owner', 'unknown')
+    # Check Git LFS lock first (this is the authoritative source)
+    if lfs_lock_info:
+        # There's an active Git LFS lock - check ownership
+        lfs_lock_owner = lfs_lock_info.get('owner')
+        
+        # Get user's mapped GitHub username using composite key
+        user_repo_info = get_user_repo(message.from_user.id)
+        user_github_username = user_repo_info.get('git_username') if user_repo_info else None
+        
+        # Check if current user owns the lock (either by Telegram ID or GitHub username)
+        is_lock_owner = (
+            lfs_lock_owner == str(message.from_user.id) or  # Direct ID match
+            lfs_lock_owner == user_github_username or       # GitHub username match
+            (user_github_username and lfs_lock_owner.lower() == user_github_username.lower())  # Case-insensitive username match
+        )
+        
+        lfs_locked_by_other = not is_lock_owner
+    else:
+        # No Git LFS lock exists - document is available for locking
+        # Local locks are ignored when no Git LFS lock exists
+        pass
+    
+    # Only check Git LFS locks (local locks removed)
+    if lfs_locked_by_other:
+        lock_owner = lfs_lock_info.get('owner', 'unknown')
         # Show error but return to document menu
-        await message.answer(f"❌ Документ {doc_name} заблокирован другим пользователем (ID: {lock_owner}). Обратитесь к владельцу блокировки для разблокировки.", reply_markup=get_document_keyboard(doc_name, is_locked=True, can_unlock=False))
+        error_msg = f"❌ Документ {doc_name} заблокирован другим пользователем (владелец: {lock_owner}). "
+        
+        # Get user info for better error message
+        user_repo_info = get_user_repo(message.from_user.id)
+        user_github_username = user_repo_info.get('git_username') if user_repo_info else None
+        
+        if lfs_locked_by_other:
+            if user_github_username and lock_owner.lower() == user_github_username.lower():
+                error_msg += "⚠️ Конфликт идентификации: Ваш GitHub аккаунт совпадает с владельцем блокировки, но система не смогла установить связь. "
+            else:
+                error_msg += "Документ заблокирован через Git LFS. "
+        elif local_locked_by_other:
+            error_msg += "Обнаружена локальная блокировка. "
+        
+        error_msg += "Обратитесь к владельцу блокировки для разблокировки или убедитесь, что ваш GitHub аккаунт правильно связан с Telegram."
+        await message.answer(error_msg, reply_markup=get_document_keyboard(doc_name, is_locked=True, can_unlock=False))
         return
     
     # Download and save the document
@@ -1112,9 +1318,27 @@ async def handle_document_upload(message):
     
     # Configure git user if not already set, then commit and push changes
     try:
-        # Set git config if not already set
-        subprocess.run(["git", "config", "user.name", "GitDocsBot"], cwd=str(repo_root), check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "bot@gitdocs.ru"], cwd=str(repo_root), check=True, capture_output=True)
+        # Set git config if not already set - use user's credentials
+        try:
+            subprocess.run(["git", "config", "--get", "user.name"], cwd=str(repo_root), check=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            # Get username from user repo config
+            user_info = get_user_repo(message.from_user.id)
+            if user_info and user_info.get('git_username'):
+                subprocess.run(["git", "config", "user.name", user_info['git_username']], cwd=str(repo_root), check=True, capture_output=True)
+            else:
+                subprocess.run(["git", "config", "user.name", str(message.from_user.id)], cwd=str(repo_root), check=True, capture_output=True)
+        
+        try:
+            subprocess.run(["git", "config", "--get", "user.email"], cwd=str(repo_root), check=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            # Get username from user repo config for email
+            user_info = get_user_repo(message.from_user.id)
+            if user_info and user_info.get('git_username'):
+                email = f"{user_info['git_username']}@users.noreply.github.com"
+                subprocess.run(["git", "config", "user.email", email], cwd=str(repo_root), check=True, capture_output=True)
+            else:
+                subprocess.run(["git", "config", "user.email", f"user-{message.from_user.id}@gitdocs.local"], cwd=str(repo_root), check=True, capture_output=True)
 
         # Pull latest changes first to avoid non-fast-forward error. Use autostash/fallback.
         # Allow auto-committing the specific doc we just uploaded if it's the only unstaged change.
@@ -1178,9 +1402,9 @@ async def handle_document_upload(message):
                     # If unlock fails, continue anyway - might not be critical
                     pass
             
-            # Push LFS objects first
+            # Push LFS objects first (only current branch)
             try:
-                lfs_push_result = subprocess.run(["git", "lfs", "push", "origin", "--all"],
+                lfs_push_result = subprocess.run(["git", "lfs", "push", "origin", "HEAD"],
                                                cwd=str(repo_root), capture_output=True, text=True)
                 if lfs_push_result.returncode != 0:
                     logging.warning(f"LFS push failed: {lfs_push_result.stderr}")
@@ -1230,14 +1454,34 @@ async def handle_document_upload(message):
 
         # Return to document menu after upload
         # doc_name is already set correctly (either from session or from uploaded file name)
-        locks = load_locks()
-        lock_info = locks.get(doc_name)
-        is_locked = lock_info is not None
+        # Check if document is locked via Git LFS
+        rel_path = str((Path('docs') / doc_name).as_posix())
         try:
-            can_unlock = is_locked and ((str(message.from_user.id) == lock_info.get('user_id')) if lock_info else False) or (str(message.from_user.id) in ADMIN_IDS)
-        except Exception:
-            can_unlock = False  # Default to not being able to unlock if there's an error
-        reply_markup = get_document_keyboard(doc_name, is_locked=is_locked, can_unlock=can_unlock)
+            lfs_lock_info = get_lfs_lock_info(rel_path, cwd=repo_root)
+            is_locked = lfs_lock_info is not None
+        except Exception as e:
+            logging.warning(f"Failed to get LFS lock info for {doc_name}: {e}")
+            is_locked = False
+        
+        # Check if user can unlock (is owner or admin)
+        can_unlock = False
+        if is_locked and lfs_lock_info:
+            try:
+                lfs_owner = lfs_lock_info.get('owner', '')
+                # Check if user is lock owner (by Telegram ID or GitHub username)
+                user_repo_info = get_user_repo(message.from_user.id)
+                user_github_username = user_repo_info.get('git_username') if user_repo_info else None
+                
+                is_lock_owner = (
+                    lfs_owner == str(message.from_user.id) or
+                    lfs_owner == user_github_username or
+                    (user_github_username and lfs_owner.lower() == user_github_username.lower())
+                )
+                can_unlock = is_lock_owner or (str(message.from_user.id) in ADMIN_IDS)
+            except Exception:
+                can_unlock = False
+        reply_markup = get_document_keyboard(doc_name, is_locked=is_locked, can_unlock=can_unlock,
+                                           current_user_id=message.from_user.id, repo_root=repo_root)
         await message.answer(summary, reply_markup=reply_markup)
         
         # Log document upload
@@ -1316,30 +1560,42 @@ async def unlock_document_by_name(message, doc_name: str):
         await message.answer(f"❌ Документ {doc_name} не найден!", reply_markup=get_document_keyboard(doc_name, is_locked=False))
         return
 
-    locks = load_locks()
-    if doc_name not in locks:
-        await message.answer(f"ℹ️ Документ {doc_name} не заблокирован.", reply_markup=get_document_keyboard(doc_name, is_locked=False))
+    # Check if document is locked via Git LFS
+    rel = str((Path('docs') / doc_name).as_posix())
+    try:
+        lfs_lock_info = get_lfs_lock_info(rel, cwd=repo_root)
+        is_locked = lfs_lock_info is not None
+    except Exception as e:
+        logging.warning(f"Failed to get LFS lock info for {doc_name}: {e}")
+        is_locked = False
+    
+    if not is_locked:
+        await message.answer(f"ℹ️ Документ {doc_name} не заблокирован через Git LFS.", reply_markup=get_document_keyboard(doc_name, is_locked=False))
         return
 
-    lock_info = locks[doc_name]
-    # Allow unlock if owner or admin
+    # Check if user is allowed to unlock (is owner or admin)
     is_allowed_to_unlock = False
     try:
-        is_allowed_to_unlock = (lock_info.get('user_id') == str(message.from_user.id)) or (str(message.from_user.id) in ADMIN_IDS)
+        lfs_owner = lfs_lock_info.get('owner', '')
+        # Check if user is lock owner (by Telegram ID or GitHub username)
+        user_repo_info = get_user_repo(message.from_user.id)
+        user_github_username = user_repo_info.get('git_username') if user_repo_info else None
+        
+        is_lock_owner = (
+            lfs_owner == str(message.from_user.id) or
+            lfs_owner == user_github_username or
+            (user_github_username and lfs_owner.lower() == user_github_username.lower())
+        )
+        is_allowed_to_unlock = is_lock_owner or (str(message.from_user.id) in ADMIN_IDS)
     except Exception:
         pass  # Default to not being allowed if there's an error
     
     if not is_allowed_to_unlock:
-        await message.answer(f"❌ У вас нет прав для разблокировки документа {doc_name} (владелец {lock_info.get('user_id')}).", reply_markup=get_document_keyboard(doc_name, is_locked=True, can_unlock=False))
+        await message.answer(f"❌ У вас нет прав для разблокировки документа {doc_name} (владелец {lfs_lock_info.get('owner', 'unknown')}).", reply_markup=get_document_keyboard(doc_name, is_locked=True, can_unlock=False))
         return
     # Try to unlock via git-lfs
-    rel = str((Path('docs') / doc_name).as_posix())
     try:
         proc = subprocess.run(["git", "lfs", "unlock", rel], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
-        # remove local lock
-        if doc_name in locks:
-            del locks[doc_name]
-            save_locks(locks)
         # Return to document menu
         reply_markup = get_document_keyboard(doc_name, is_locked=False)
         await message.answer(f"🔓 Документ {doc_name} успешно разблокирован через git-lfs!\n{proc.stdout.strip()}", reply_markup=reply_markup)
@@ -1363,30 +1619,24 @@ async def unlock_document_by_name(message, doc_name: str):
                 subprocess.run(["git", "commit", "-m", f"Auto-commit for unlock {doc_name}"], cwd=str(repo_root), check=True, capture_output=True)
                 # Retry unlock
                 proc2 = subprocess.run(["git", "lfs", "unlock", rel], cwd=str(REPO_PATH), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
-                if doc_name in locks:
-                    del locks[doc_name]
-                    save_locks(locks)
                 # Return to document menu
                 reply_markup = get_document_keyboard(doc_name, is_locked=False)
                 await message.answer(f"🔓 Документ {doc_name} разблокирован после авто-коммита: {proc2.stdout.strip()}", reply_markup=reply_markup)
                 return
             except subprocess.CalledProcessError as e2:
-                # fall through to remove local lock and report
+                # Report error
                 err2 = (e2.stderr or e2.stdout or '').strip()
-                if doc_name in locks:
-                    del locks[doc_name]
-                    save_locks(locks)
                 # Return to document menu
-                reply_markup = get_document_keyboard(doc_name, is_locked=False)
-                await message.answer(f"⚠️ Ошибка при автокоммите/разблокировке: {err2[:200]}. Локальная блокировка удалена.", reply_markup=reply_markup)
+                reply_markup = get_document_keyboard(doc_name, is_locked=True)
+                await message.answer(f"⚠️ Ошибка при автокоммите/разблокировке: {err2[:200]}", reply_markup=reply_markup)
                 return
-        # Other errors: remove local lock and report
-        if doc_name in locks:
-            del locks[doc_name]
-            save_locks(locks)
+        # Other errors: report error
         # Return to document menu
-        reply_markup = get_document_keyboard(doc_name, is_locked=False)
-        await message.answer(f"⚠️ Ошибка при попытке разблокировать через git-lfs: {err[:200]}. Локальная блокировка удалена.", reply_markup=reply_markup)
+        reply_markup = get_document_keyboard(doc_name, is_locked=True)
+        await message.answer(f"⚠️ Ошибка при разблокировке: {err[:200]}", reply_markup=reply_markup)
+        # Return to document menu
+        reply_markup = get_document_keyboard(doc_name, is_locked=True)
+        await message.answer(f"⚠️ Ошибка при попытке разблокировать через git-lfs: {err[:200]}", reply_markup=reply_markup)
 
 async def lock_document_by_name(message, doc_name: str):
     repo_root = get_repo_for_user_id(message.from_user.id)
@@ -1396,26 +1646,23 @@ async def lock_document_by_name(message, doc_name: str):
         await message.answer(f"❌ Документ {doc_name} не найден!", reply_markup=get_document_keyboard(doc_name, is_locked=False))
         return
     
-    # Load existing locks
-    locks = load_locks()
-    
-    # Check if already locked
-    if doc_name in locks:
-        await message.answer(f"❌ Документ {doc_name} уже заблокирован пользователем {locks[doc_name]['user_id']}!", reply_markup=get_document_keyboard(doc_name, is_locked=True, can_unlock=False))
-        return
+    # Check if already locked via Git LFS
+    rel = str((Path('docs') / doc_name).as_posix())
+    repo_root = get_repo_for_user_id(message.from_user.id)
+    try:
+        lfs_lock_info = get_lfs_lock_info(rel, cwd=repo_root)
+        if lfs_lock_info:
+            await message.answer(f"❌ Документ {doc_name} уже заблокирован через Git LFS пользователем {lfs_lock_info.get('owner', 'unknown')}!", reply_markup=get_document_keyboard(doc_name, is_locked=True, can_unlock=False))
+            return
+    except Exception as e:
+        logging.warning(f"Failed to check LFS lock status for {doc_name}: {e}")
     
     # Create lock
     # Try to lock via git-lfs first (so others see it)
     rel = str((Path('docs') / doc_name).as_posix())
     try:
         proc = subprocess.run(["git", "lfs", "lock", rel], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
-        # Record local lock info (owner is the Telegram user for permission gating)
-        locks[doc_name] = {
-            'user_id': str(message.from_user.id),
-            'timestamp': datetime.now().isoformat(),
-            'lfs_raw': proc.stdout.strip()
-        }
-        save_locks(locks)
+        # Git LFS lock created successfully - no local lock needed
         # Return to document menu
         reply_markup = get_document_keyboard(doc_name, is_locked=True, can_unlock=True)
         await message.answer(f"🔒 Документ {doc_name} успешно заблокирован через git-lfs!\n{proc.stdout.strip()}", reply_markup=reply_markup)
@@ -1434,15 +1681,8 @@ async def lock_document_by_name(message, doc_name: str):
                 err = str(err_raw).strip()
         except Exception:
             err = str(err_raw).strip()
-        # Fallback to local lock if LFS not available
-        locks[doc_name] = {
-            'user_id': str(message.from_user.id),
-            'timestamp': datetime.now().isoformat()
-        }
-        save_locks(locks)
-        # Return to document menu
-        reply_markup = get_document_keyboard(doc_name, is_locked=True, can_unlock=True)
-        await message.answer(f"⚠️ Не удалось заблокировать через git-lfs: {err[:200]}. Создана локальная блокировка.", reply_markup=reply_markup)
+        # Git LFS is required - no local fallback
+        await message.answer(f"❌ Не удалось заблокировать через git-lfs: {err[:200]}.")
 
 async def check_lock_status(message):
     # Only admins can view all locks; regular users can only see their own locks
@@ -1473,21 +1713,8 @@ async def check_lock_status(message):
         user_name = format_user_name(message)
         log_message = f"🔒 Администратор {user_name} проверил статус всех блокировок (git-lfs)"
         await log_to_group(message, log_message)
-    except subprocess.CalledProcessError:
-        # Fallback to local locks file
-        locks = load_locks()
-        if not locks:
-            await message.answer("🔓 Нет активных блокировок", reply_markup=get_locks_keyboard(user_id=message.from_user.id))
-            return
-        status_text = "🔒 Активные локальные блокировки:\n"
-        for doc_name, lock_info in locks.items():
-            status_text += f"📄 {doc_name} - пользователь {lock_info['user_id']} (с {lock_info['timestamp']})\n"
-        await message.answer(status_text, reply_markup=get_locks_keyboard(user_id=message.from_user.id))
-        
-        # Log lock status check
-        user_name = format_user_name(message)
-        log_message = f"🔒 Администратор {user_name} проверил статус всех блокировок (локально)"
-        await log_to_group(message, log_message)
+    except subprocess.CalledProcessError as e:
+        await message.answer(f"❌ Ошибка получения статуса блокировок: {str(e)[:200]}", reply_markup=get_locks_keyboard(user_id=message.from_user.id))
 
 
 async def update_repository(message):
@@ -1667,13 +1894,38 @@ async def git_status(message):
             log = log_result.stdout.decode('utf-8', errors='replace') if isinstance(log_result.stdout, bytes) else log_result.stdout
             log = log.strip()
             
-            out = f"📄 {session['doc']}\n\nСтатус:\n{st if st else 'все файлы в актуальном состоянии, нет несохранённых изменений'}\n\nRecent commits:\n{log if log else 'none'}"
+            # Check Git LFS lock status
+            rel_path = str((Path('docs') / session['doc']).as_posix())
+            try:
+                lfs_lock_info = get_lfs_lock_info(rel_path, cwd=repo_root)
+                is_locked = lfs_lock_info is not None
+                
+                if is_locked:
+                    # Get user's GitHub username for ownership check
+                    user_repo_info = get_user_repo(message.from_user.id)
+                    user_github_username = user_repo_info.get('git_username') if user_repo_info else None
+                    
+                    lfs_owner = lfs_lock_info.get('owner', '')
+                    is_lock_owner = (
+                        lfs_owner == str(message.from_user.id) or
+                        lfs_owner == user_github_username or
+                        (user_github_username and lfs_owner.lower() == user_github_username.lower())
+                    )
+                    can_unlock = is_lock_owner or (str(message.from_user.id) in ADMIN_IDS)
+                    
+                    lock_status = f"\n\n🔒 Заблокирован через Git LFS: {lfs_owner}"
+                else:
+                    can_unlock = False
+                    lock_status = "\n\n🔓 Не заблокирован"
+            except Exception as e:
+                is_locked = False
+                can_unlock = False
+                lock_status = f"\n\n⚠️ Ошибка проверки блокировки: {str(e)[:100]}"
+            
+            out = f"📄 {session['doc']}\n\nСтатус:\n{st if st else 'все файлы в актуальном состоянии, нет несохранённых изменений'}\n\nRecent commits:\n{log if log else 'none'}{lock_status}"
             # Return to document menu if viewing document status
-            locks = load_locks()
-            lock_info = locks.get(session['doc'])
-            is_locked = lock_info is not None
-            can_unlock = is_locked and ((str(message.from_user.id) == lock_info.get('user_id')) or (str(message.from_user.id) in ADMIN_IDS))
-            reply_markup = get_document_keyboard(session['doc'], is_locked=is_locked, can_unlock=can_unlock)
+            reply_markup = get_document_keyboard(session['doc'], is_locked=is_locked, can_unlock=can_unlock,
+                                               current_user_id=message.from_user.id, repo_root=repo_root)
         else:
             # Run git status with proper encoding handling
             st_result = subprocess.run(["git", "status", "--short"], cwd=str(repo_root), check=True, capture_output=True)
@@ -1755,9 +2007,27 @@ async def commit_all_changes(message):
             await message.answer("ℹ️ Нет изменений для коммита. Репозиторий уже синхронизирован.", reply_markup=get_git_operations_keyboard(user_id=message.from_user.id))
             return
         
-        # Set git config if not already set
-        subprocess.run(["git", "config", "user.name", "GitDocsBot"], cwd=str(repo_root), check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "bot@gitdocs.ru"], cwd=str(repo_root), check=True, capture_output=True)
+        # Set git config if not already set - use user's credentials
+        try:
+            subprocess.run(["git", "config", "--get", "user.name"], cwd=str(repo_root), check=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            # Get username from user repo config
+            user_info = get_user_repo(message.from_user.id)
+            if user_info and user_info.get('git_username'):
+                subprocess.run(["git", "config", "user.name", user_info['git_username']], cwd=str(repo_root), check=True, capture_output=True)
+            else:
+                subprocess.run(["git", "config", "user.name", str(message.from_user.id)], cwd=str(repo_root), check=True, capture_output=True)
+        
+        try:
+            subprocess.run(["git", "config", "--get", "user.email"], cwd=str(repo_root), check=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            # Get username from user repo config for email
+            user_info = get_user_repo(message.from_user.id)
+            if user_info and user_info.get('git_username'):
+                email = f"{user_info['git_username']}@users.noreply.github.com"
+                subprocess.run(["git", "config", "user.email", email], cwd=str(repo_root), check=True, capture_output=True)
+            else:
+                subprocess.run(["git", "config", "user.email", f"user-{message.from_user.id}@gitdocs.local"], cwd=str(repo_root), check=True, capture_output=True)
         
         # Pull latest changes first to avoid conflicts
         ok, err = git_pull_rebase_autostash(str(repo_root))
@@ -1782,10 +2052,10 @@ async def commit_all_changes(message):
         commit_msg = f"Update repository by {user_name}\n\nChanges:\n{file_list}"
         subprocess.run(["git", "commit", "-m", commit_msg], cwd=str(repo_root), check=True, capture_output=True)
         
-        # Push LFS objects first
+        # Push LFS objects first (only current branch)
         await message.answer("📤 Отправляю LFS объекты...")
         try:
-            lfs_push_result = subprocess.run(["git", "lfs", "push", "origin", "--all"],
+            lfs_push_result = subprocess.run(["git", "lfs", "push", "origin", "HEAD"],
                                            cwd=str(repo_root), capture_output=True, text=True, timeout=60)
             if lfs_push_result.returncode != 0:
                 logging.warning(f"LFS push failed: {lfs_push_result.stderr}")
@@ -1863,19 +2133,10 @@ async def force_unlock_by_name(message, doc_name: str):
     repo_root = get_repo_for_user_id(message.from_user.id)
     try:
         proc = subprocess.run(["git", "lfs", "unlock", "--force", rel], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
-        locks = load_locks()
-        if doc_name in locks:
-            del locks[doc_name]
-            save_locks(locks)
         await message.answer(f"🔓 Документ {doc_name} успешно принудительно разблокирован (git-lfs).\n{proc.stdout.strip()}", reply_markup=get_document_keyboard(doc_name, is_locked=False))
     except subprocess.CalledProcessError as e:
         err = (e.stderr or e.stdout or '').strip()
-        # still remove local lock if present
-        locks = load_locks()
-        if doc_name in locks:
-            del locks[doc_name]
-            save_locks(locks)
-        await message.answer(f"⚠️ Ошибка при принудительной разблокировке: {err[:200]}. Локальная блокировка удалена.", reply_markup=get_document_keyboard(doc_name, is_locked=False))
+        await message.answer(f"⚠️ Ошибка при принудительной разблокировке: {err[:200]}", reply_markup=get_document_keyboard(doc_name, is_locked=False))
 
 
 async def fix_lfs_issues(message):
@@ -2166,12 +2427,26 @@ async def handle_repo_action_simple(msg, action):
             logging.error("Clone failed: %s", e.stderr.decode(errors='ignore') if e.stderr else '')
             await msg.answer("❌ Ошибка при клонировании.", reply_markup=get_main_keyboard())
 
-    # Configure git and git-lfs
+    # Configure git and git-lfs - use user's credentials
     try:
-        subprocess.run(["git", "config", "user.name", "GitDocsBot"], cwd=str(repo_dir), check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "bot@gitdocs.ru"], cwd=str(repo_dir), check=True, capture_output=True)
+        # Only set git config if not already configured
+        subprocess.run(["git", "config", "--get", "user.name"], cwd=str(repo_dir), check=True, capture_output=True)
     except subprocess.CalledProcessError:
-        pass
+        # Set user name from provided username
+        try:
+            subprocess.run(["git", "config", "user.name", username], cwd=str(repo_dir), check=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            pass
+    
+    try:
+        subprocess.run(["git", "config", "--get", "user.email"], cwd=str(repo_dir), check=True, capture_output=True)
+    except subprocess.CalledProcessError:
+        # Set email based on username
+        try:
+            email = f"{username}@users.noreply.github.com"
+            subprocess.run(["git", "config", "user.email", email], cwd=str(repo_dir), check=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            pass
 
     try:
         subprocess.run(["git", "lfs", "install"], cwd=str(repo_dir), check=True, capture_output=True)
@@ -2261,6 +2536,9 @@ async def main():
                 return
             if text == "ℹ️ О репозитории":
                 await repo_info(msg)
+                return
+            if text == "📖 Инструкции":
+                await show_instructions(msg)
                 return
 
             # Git операции меню
@@ -2369,6 +2647,56 @@ async def main():
             await app.updater.stop()
             await app.stop()
         return
+
+async def show_instructions(message):
+    """Show instructions for repository setup and GPG key generation"""
+    instructions = """📖 ИНСТРУКЦИИ ПО НАСТРОЙКЕ
+
+📋 Как получить адрес удаленного репозитория:
+1. Перейдите на GitHub
+2. Откройте нужный репозиторий
+3. Нажмите зеленую кнопку "Code"
+4. Выберите HTTPS или SSH
+5. Скопируйте полный URL
+   Пример: https://github.com/username/repository.git
+
+👤 Как узнать свой логин на GitHub:
+1. Зайдите в свой профиль на GitHub
+2. Ваш логин отображается в URL профиля
+3. Или посмотрите в правом верхнем углу
+4. Пример: если URL https://github.com/johnsmith, то логин - johnsmith
+
+🔐 Как сгенерировать Personal Access Token (рекомендуется вместо пароля):
+1. На GitHub перейдите в Settings → Developer settings → Personal access tokens
+2. Нажмите "Generate new token"
+3. Выберите classic token или fine-grained token
+4. Установите срок действия
+5. Выберите необходимые права (repo, workflow, etc.)
+6. Сгенерируйте и СОХРАНИТЕ токен (показывается только один раз!)
+
+🔑 Альтернатива - SSH ключи:
+1. Откройте терминал/Git Bash
+2. Выполните: ssh-keygen -t ed25519 -C "your_email@example.com"
+3. Сохраните ключ в ~/.ssh/id_ed25519
+4. Добавьте ключ в ssh-agent: ssh-add ~/.ssh/id_ed25519
+5. Скопируйте публичный ключ: cat ~/.ssh/id_ed25519.pub
+6. Добавьте ключ в GitHub: Settings → SSH and GPG keys → New SSH key
+
+🛡️ Безопасность:
+• Никогда не публикуйте свои токены или приватные ключи
+• Используйте разные токены для разных целей
+• Регулярно обновляйте токены
+• Для работы с этим ботом достаточно прав на чтение/запись репозитория
+
+💡 Советы:
+• Для частного использования рекомендуется Personal Access Token
+• Для автоматических систем лучше SSH ключи
+• Храните токены в безопасном месте (менеджер паролей)
+• При утере токена немедженно отзовите его в GitHub
+
+Нужна помощь? Обратитесь к официальной документации GitHub!"""
+    
+    await message.answer(instructions, reply_markup=get_main_keyboard())
 
 if __name__ == "__main__":
     asyncio.run(main())

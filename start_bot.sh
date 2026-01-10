@@ -6,7 +6,7 @@
 sleep 2
 
 # Ensure necessary directories exist
-mkdir -p user_repos logs
+mkdir -p user_repos logs repo
 
 # Start the bot
 python bot.py
