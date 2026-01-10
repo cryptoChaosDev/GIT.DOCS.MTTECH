@@ -1,0 +1,10 @@
+version: '3.8'
+
+services:
+  test-bot:
+    build: .
+    container_name: test-git-docs-bot
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+    command: python test_bot.py
+    restart: unless-stopped
