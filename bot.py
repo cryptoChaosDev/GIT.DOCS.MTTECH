@@ -129,13 +129,23 @@ if not USER_REPOS_FILE.exists() or not USER_REPOS_FILE.is_file():
 # Local lock functions removed - using Git LFS locks exclusively
 # get_repo_header function was removed as it was deprecated and unused
 
+# Global cache for user repositories
+global user_repos_cache
+user_repos_cache = None
 
 def load_user_repos() -> dict:
+    global user_repos_cache
+    
+    # Return cached data if available
+    if user_repos_cache is not None:
+        return user_repos_cache
+    
     try:
         # Check if the path exists and is a file (not a directory)
         if USER_REPOS_FILE.exists():
             if USER_REPOS_FILE.is_file():
-                return json.loads(USER_REPOS_FILE.read_text())
+                user_repos_cache = json.loads(USER_REPOS_FILE.read_text())
+                return user_repos_cache
             else:
                 # Path exists but is a directory (likely due to Docker volume mount when file didn't exist)
                 # Return empty dict since we can't safely remove a mounted directory
@@ -162,7 +172,11 @@ def _mask_repo_url(url: str) -> str:
 
 
 def save_user_repos(m: dict):
+    global user_repos_cache
     try:
+        # Update cache first
+        user_repos_cache = m
+        
         # Ensure parent directory exists before writing
         USER_REPOS_FILE.parent.mkdir(parents=True, exist_ok=True)
         # If the path exists but is a directory (e.g., due to Docker volume mount), we can't safely remove it
