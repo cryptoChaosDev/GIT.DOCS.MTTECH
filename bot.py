@@ -523,10 +523,22 @@ def get_main_keyboard(user_id=None):
         user_repo = get_user_repo(user_id)
         has_repo = user_repo is not None
 
+    # Check if user is admin
+    is_admin = False
+    if user_id is not None:
+        try:
+            is_admin = str(user_id) in ADMIN_IDS
+        except Exception:
+            is_admin = False
+    
     keyboard = [
         ["📋 Документы"],
-        ["🔄 Git операции", "🔒 Блокировки"]
+        ["🔄 Git операции"]
     ]
+    
+    # Add locks button only for admins
+    if is_admin:
+        keyboard[1].append("🔒 Блокировки")
 
     # Only show settings if repository is not configured OR if user_id is None (backward compatibility)
     if not has_repo or user_id is None:
