@@ -1,121 +1,180 @@
-# GitDocs Bot
+# Git Docs Telegram Bot
 
-A Telegram bot that manages DOCX documents in Git repositories through a chat interface.
+Telegram бот для управления документами через Git с поддержкой Git LFS и системой блокировок.
 
-## Features
+## 📋 Описание
 
-- Clone and manage Git repositories
-- View and download DOCX documents
-- Lock documents to prevent concurrent edits
-- Upload updated documents
-- Git operations (pull, commit, push)
-- Admin functions for repository management
-- Per-user repository isolation
+Бот позволяет командам совместно работать с документами (.docx), обеспечивая:
+- Централизованное хранение документов в Git репозитории
+- Систему блокировок для предотвращения конфликтов при одновременном редактировании
+- Автоматическую синхронизацию с GitHub/GitLab
+- Удобный Telegram интерфейс для всех операций
 
-## Prerequisites
+## 🚀 Возможности
 
-- Docker and Docker Compose
-- A Telegram bot token (get one from [@BotFather](https://t.me/BotFather))
-- Git LFS enabled repository
+### Для пользователей:
+- 📂 Просмотр списка документов в репозитории
+- 🔒 Блокировка/разблокировка документов (Git LFS)
+- ⬆️ Загрузка измененных документов
+- 🔄 Обновление локальной копии из репозитория
+- 🧾 Просмотр статуса Git
 
-## Quick Deployment with Docker
+### Для администраторов:
+- 👥 Управление пользователями и их репозиториями
+- 🔧 Расширенные Git операции
+- 📊 Мониторинг блокировок
+- ⚙️ Настройка системы
 
-### 1. Clone the repository
+## 🛠 Технологии
 
+- **Python 3.12**
+- **aiogram** - Telegram Bot API
+- **Git** с поддержкой **Git LFS**
+- **Docker** и **Docker Compose**
+- **JSON** для хранения конфигурации
+
+## 📦 Установка и запуск
+
+### Требования:
+- Docker и Docker Compose
+- Telegram Bot Token
+- Доступ к Git репозиторию
+
+### 1. Клонирование репозитория:
 ```bash
 git clone <your-repo-url>
 cd git-docs-bot
 ```
 
-### 2. Configure environment variables
-
-Copy the example environment file and update with your values:
-
-```bash
-cp .env.example .env
-# Edit the .env file with your bot token and other settings
-```
-
-### 3. Deploy with Docker
-
-```bash
-chmod +x deploy.sh
-./deploy.sh
-```
-
-## Manual Deployment
-
-### 1. Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 2. Set environment variables
-
-Create a `.env` file with the following content:
-
+### 2. Настройка окружения:
+Создайте файл `.env`:
 ```env
 BOT_TOKEN=your_telegram_bot_token
-ADMIN_IDS=309462378
+ADMIN_IDS=123456789,987654321
 AUTO_UNLOCK_ON_UPLOAD=false
 ```
 
-### 3. Run the bot
-
+### 3. Запуск:
 ```bash
-python bot.py
-```
-
-## Configuration
-
-- `BOT_TOKEN`: Your Telegram bot token from BotFather
-- `ADMIN_IDS`: Comma-separated list of user IDs with admin privileges
-- `AUTO_UNLOCK_ON_UPLOAD`: Whether to automatically unlock documents after upload (true/false)
-
-## Volumes
-
-The Docker deployment persists data in these volumes:
-
-- `user_repos/`: Per-user repository clones
-- `logs/`: Application logs
-- `locks.json`: Document lock information
-- `user_repos.json`: User repository mappings
-
-## Management Commands
-
-When using Docker Compose:
-
-```bash
-# View logs
-docker-compose logs -f git-docs-bot
-
-# Restart the bot
-docker-compose restart git-docs-bot
-
-# Stop the bot
-docker-compose down
-
-# Update the bot (rebuild and restart)
 docker-compose up -d --build
 ```
 
-## Security Notes
-
-- Never commit your bot token to version control
-- The bot stores repository credentials temporarily in memory
-- Rate limiting is implemented to prevent abuse
-- Only configured admin users can perform sensitive operations
-
-## Troubleshooting
-
-If the bot fails to start, check the logs:
-
+### 4. Проверка работы:
 ```bash
-docker-compose logs git-docs-bot
+docker-compose logs -f
 ```
 
-Make sure:
-- Your bot token is correct
-- The bot has necessary permissions in your Git repositories
-- Git LFS is properly configured in your repositories
+## 📖 Использование
+
+### Первичная настройка:
+1. Запустите бота
+2. Нажмите "ℹ️ О репозитории"
+3. Нажмите "⚙️ Настроить репозиторий"
+4. Введите URL вашего Git репозитория
+5. Введите ваш GitHub/GitLab логин
+6. Введите Personal Access Token
+
+### Работа с документами:
+1. Нажмите "📂 Документы"
+2. Выберите нужный файл
+3. Для защиты от конфликтов нажмите "🔒 Заблокировать"
+4. Внесите изменения в документ
+5. Нажмите "⬆️ Загрузить изменения"
+6. После завершения нажмите "🔓 Разблокировать"
+
+## 🔐 Создание Personal Access Token
+
+### Для GitHub:
+1. Settings → Developer settings → Personal access tokens
+2. Generate new token (classic)
+3. Выберите права: `repo` (все подпункты)
+4. Установите срок действия
+5. Скопируйте токен (показывается только один раз)
+
+### Для GitLab:
+1. Settings → Access Tokens
+2. Создайте токен с правами: `read_repository`, `write_repository`, `api`
+3. Скопируйте токен
+
+## 🏗 Структура проекта
+
+```
+git-docs-bot/
+├── bot.py                 # Основной код бота
+├── docker-compose.yml     # Конфигурация Docker Compose
+├── Dockerfile            # Docker образ
+├── .env                  # Переменные окружения (создать)
+├── .gitignore           # Игнорируемые файлы
+├── data/                # Постоянные данные (volume)
+│   ├── user_repos.json  # Конфигурация пользователей
+│   └── .git-credentials # Учетные данные Git
+├── user_repos/          # Локальные репозитории пользователей (volume)
+├── logs/               # Логи (volume)
+└── README.md           # Документация
+```
+
+## ⚙️ Конфигурация
+
+### Основные переменные окружения:
+- `BOT_TOKEN` - Токен Telegram бота
+- `ADMIN_IDS` - Список ID администраторов (через запятую)
+- `AUTO_UNLOCK_ON_UPLOAD` - Автоматическая разблокировка при загрузке (true/false)
+
+### Постоянные данные:
+Все пользовательские данные хранятся в volumes Docker и сохраняются между перезапусками:
+- `/app/data` - конфигурация и учетные данные
+- `/app/user_repos` - локальные копии репозиториев
+- `/app/logs` - логи работы
+
+## 🔧 Разработка
+
+### Локальная разработка:
+```bash
+# Установка зависимостей
+pip install -r requirements.txt
+
+# Запуск бота
+python bot.py
+```
+
+### Сборка Docker образа:
+```bash
+docker build -t git-docs-bot .
+```
+
+## 📊 Мониторинг
+
+### Просмотр логов:
+```bash
+docker-compose logs -f git-docs-bot
+```
+
+### Проверка состояния:
+```bash
+docker-compose ps
+```
+
+## 🔒 Безопасность
+
+- Персональные токены хранятся в защищенных файлах
+- Доступ к репозиториям ограничен правами пользователей
+- Все коммуникации через HTTPS
+- Регулярное обновление токенов рекомендуется
+
+## 🆘 Поддержка
+
+При возникновении проблем:
+1. Проверьте логи `docker-compose logs`
+2. Убедитесь в правильности токенов доступа
+3. Проверьте права доступа к репозиторию
+4. Обратитесь к администратору системы
+
+## 📄 Лицензия
+
+MIT License
+
+## 🙏 Благодарности
+
+- Telegram Bot API
+- Git и Git LFS
+- Docker Community
