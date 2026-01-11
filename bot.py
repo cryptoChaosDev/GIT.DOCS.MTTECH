@@ -3146,7 +3146,10 @@ async def perform_user_repo_setup(message, session, repo_url):
             f"✅ Ваш репозиторий успешно настроен!\n"
             f"URL: {repo_url}\n"
             f"Путь: {repo_path}\n\n"
-            f"Теперь вы будете видеть документы из нового репозитория."
+            f"💡 При первой операции с документами Git запросит ваши учетные данные:\n"
+            f"• Username: ваш GitHub username\n"
+            f"• Password: Personal Access Token (не пароль!)\n\n"
+            f"Создайте PAT на GitHub: Settings → Developer settings → Personal access tokens"
         )
         
     except subprocess.CalledProcessError as e:
