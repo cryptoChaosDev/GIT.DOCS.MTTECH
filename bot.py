@@ -3024,6 +3024,22 @@ async def update_user_field(message, field_name, new_value):
     user_sessions[message.from_user.id] = session
     globals()['user_edit_sessions'] = user_sessions
     
+    # Special handling for repo_url change
+    if field_name == 'repo_url':
+        try:
+            # Clone new repository
+            repo_path = Path(session['user_info']['repo_path'])
+            if repo_path.exists():
+                # Remove old repository
+                import shutil
+                shutil.rmtree(repo_path)
+            
+            # Clone new repository
+            subprocess.run(['git', 'clone', new_value, str(repo_path)], check=True, capture_output=True)
+            await message.answer(f"✅ Репозиторий успешно переключен на: {new_value}")
+        except Exception as e:
+            await message.answer(f"⚠️ Репозиторий обновлен в настройках, но возникла ошибка при клонировании: {str(e)}")
+    
     # Confirm update
     field_names = {
         'telegram_username': 'Telegram username',
@@ -3031,7 +3047,8 @@ async def update_user_field(message, field_name, new_value):
         'repo_url': 'URL репозитория'
     }
     
-    await message.answer(f"✅ {field_names.get(field_name, field_name)} обновлен на: {new_value}")
+    if field_name != 'repo_url':  # Don't send duplicate message for repo_url
+        await message.answer(f"✅ {field_names.get(field_name, field_name)} обновлен на: {new_value}")
 
 
 async def save_user_changes(message):
