@@ -2636,24 +2636,17 @@ async def main():
             # DEBUG: Check if we reach this point
             print(f"DEBUG: Processing text: '{text}'")
             
-            # Handle command-like text (commands that start with /)
-            if text.startswith('/'):
-                # Handle /edit_user_{ID} commands
-                print(f"DEBUG: Found command starting with /, checking if it's /edit_user_")
-                if text.startswith('/edit_user_'):
-                    try:
-                        target_user_id = text.replace('/edit_user_', '')
-                        if target_user_id.isdigit():
-                            await edit_user_data(msg, target_user_id)
-                        else:
-                            await msg.answer("❌ Неверный формат ID. Используйте: /edit_user_123456789")
-                        return
-                    except Exception as e:
-                        await msg.answer(f"❌ Ошибка обработки команды: {str(e)}")
-                        return
-                # Handle other commands here if needed
-                else:
-                    await msg.answer("❓ Неизвестная команда")
+            # Handle user edit buttons
+            if text.startswith("✏️ Редактировать "):
+                try:
+                    target_user_id = text.replace("✏️ Редактировать ", "")
+                    if target_user_id.isdigit():
+                        await show_user_edit_menu(msg, target_user_id)
+                    else:
+                        await msg.answer("❌ Неверный формат ID пользователя")
+                    return
+                except Exception as e:
+                    await msg.answer(f"❌ Ошибка: {str(e)}")
                     return
             
             # Главное меню
@@ -2911,8 +2904,10 @@ async def show_users_management(message):
                            reply_markup=get_settings_keyboard(message.from_user.id))
         return
     
-    # Build user list
+    # Build user list with edit buttons
     user_list = "👥 Пользователи с настроенными репозиториями:\n\n"
+    
+    keyboard = []
     
     for key, repo_info in user_repos.items():
         telegram_id = repo_info.get('telegram_id', 'unknown')
@@ -2923,14 +2918,14 @@ async def show_users_management(message):
         user_list += f"👤 ID: {telegram_id}\n"
         user_list += f"   📱 Telegram: @{telegram_username}\n"
         user_list += f"   🐙 GitHub: {git_username}\n"
-        user_list += f"   🔗 Репозиторий: {repo_url}\n"
-        user_list += f"   📝 Редактировать: /edit_user_{telegram_id}\n\n"
+        user_list += f"   🔗 Репозиторий: {repo_url}\n\n"
+        
+        # Add edit button for each user
+        keyboard.append([f"✏️ Редактировать {telegram_id}"])
     
     # Add navigation buttons
-    keyboard = [
-        ["🔄 Обновить список"],
-        ["◀️ Назад в настройки"]
-    ]
+    keyboard.append(["🔄 Обновить список"])
+    keyboard.append(["◀️ Назад в настройки"])
     
     if PTB_AVAILABLE:
         reply_markup = PTBReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
@@ -2940,45 +2935,40 @@ async def show_users_management(message):
     await message.answer(user_list, reply_markup=reply_markup)
 
 
-async def edit_user_data(message, target_user_id):
-    """Edit specific user data"""
-    print(f"DEBUG: edit_user_data called with target_user_id: {target_user_id}")
-    
+async def show_user_edit_menu(message, target_user_id):
+    """Show user editing menu with buttons"""
     user_repos = load_user_repos()
-    print(f"DEBUG: Loaded user_repos with {len(user_repos)} entries")
     
     # Find user by ID
-    user_key = None
     user_info = None
+    user_key = None
     
     for key, repo_info in user_repos.items():
-        print(f"DEBUG: Checking key: {key}, telegram_id: {repo_info.get('telegram_id')}")
         if str(repo_info.get('telegram_id')) == str(target_user_id):
             user_key = key
             user_info = repo_info
-            print(f"DEBUG: Found user! Key: {user_key}")
             break
     
     if not user_info:
-        print(f"DEBUG: User {target_user_id} not found in user_repos")
         await message.answer("❌ Пользователь не найден.", 
                            reply_markup=get_settings_keyboard(message.from_user.id))
         return
     
-    # Show current data and editing options
+    # Show current data
     current_data = f"📝 Редактирование пользователя ID: {target_user_id}\n\n"
-    current_data += f"📱 Telegram username: {user_info.get('telegram_username', 'не задан')}\n"
-    current_data += f"🐙 GitHub username: {user_info.get('git_username', 'не задан')}\n"
+    current_data += "Текущие данные:\n"
+    current_data += f"📱 Telegram: @{user_info.get('telegram_username', 'не задан')}\n"
+    current_data += f"🐙 GitHub: {user_info.get('git_username', 'не задан')}\n"
     current_data += f"🔗 Репозиторий: {user_info.get('repo_url', 'не задан')}\n\n"
-    current_data += "Выберите что изменить:"
+    current_data += "Выберите поле для изменения:"
     
-    # Editing options
+    # Create editing buttons
     keyboard = [
-        [f"📱 Изменить Telegram (@{user_info.get('telegram_username', 'не задан')})"],
-        [f"🐙 Изменить GitHub ({user_info.get('git_username', 'не задан')})"],
-        [f"🔗 Изменить репозиторий ({'задан' if user_info.get('repo_url') else 'не задан'})"],
+        ["📱 Изменить Telegram"],
+        ["🐙 Изменить GitHub"],
+        ["🔗 Изменить репозиторий"],
         ["💾 Сохранить изменения"],
-        ["◀️ Назад к списку"]
+        ["❌ Отмена"]
     ]
     
     if PTB_AVAILABLE:
@@ -2986,13 +2976,12 @@ async def edit_user_data(message, target_user_id):
     else:
         reply_markup = keyboard
     
-    # Store current user data in session for editing
+    # Store user data for editing session
     user_sessions = globals().get('user_edit_sessions', {})
     user_sessions[message.from_user.id] = {
         'target_user_id': target_user_id,
         'user_key': user_key,
-        'original_data': user_info.copy(),
-        'edited_data': user_info.copy()
+        'user_info': user_info.copy()
     }
     globals()['user_edit_sessions'] = user_sessions
     
