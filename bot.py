@@ -216,8 +216,13 @@ def get_user_repo(user_id: int, git_username: str = None):
     return None
 
 
+def format_datetime() -> str:
+    """Format current datetime as YYYY-MM-DD HH:MM:SS"""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def format_user_name(message) -> str:
-    """Format user name for commit messages: username (id) or first_name (id) or just id"""
+    """Format user name as Telegram hyperlink: [@username](https://t.me/username) or first_name"""
     user_id = None
     username = None
     first_name = None
@@ -236,11 +241,11 @@ def format_user_name(message) -> str:
             username = getattr(effective_user, 'username', None)
             first_name = getattr(effective_user, 'first_name', None)
     
-    # Format: prefer username, then first_name, then just id
+    # Format as Telegram hyperlink: prefer username, then first_name
     if username:
-        return f"{username} ({user_id})" if user_id else username
+        return f"[ @{username} ](https://t.me/{username})"
     elif first_name:
-        return f"{first_name} ({user_id})" if user_id else first_name
+        return first_name
     elif user_id:
         return f"user_{user_id}"
     else:
@@ -599,8 +604,6 @@ def get_document_keyboard(doc_name, is_locked=False, can_unlock=False, current_u
         if not is_locked or can_upload:
             keyboard[0].append("📤 Загрузить изменения")
         
-        keyboard.append(["🧾 Статус документа"])
-        
         if is_locked:
             if can_unlock:
                 keyboard.insert(1, ["🔓 Разблокировать"])
@@ -633,8 +636,7 @@ def get_git_operations_keyboard(user_id=None):
             is_admin = False  # Default to non-admin if there's an error
     
     keyboard = [
-        ["🔄 Обновить репозиторий", "🧾 Git статус"],
-        ["💾 Закоммитить все изменения"]
+        ["🔄 Обновить репозиторий", "🧾 Git статус"]
     ]
     
     # Add admin-only operations
@@ -717,7 +719,8 @@ async def start(message, state=None):
     )
     # Log user interaction
     user_name = format_user_name(message)
-    log_message = f"🔄 Пользователь {user_name} запустил бота"
+    timestamp = format_datetime()
+    log_message = f"🔄 Пользователь {user_name} запустил бота [{timestamp}]"
     await log_to_group(message, log_message)
 
 async def setup_repo(message, state=None):
@@ -844,7 +847,8 @@ async def process_password(message, state=None):
         
         # Log repository setup
         user_name = format_user_name(message)
-        log_message = f"🔧 Пользователь {user_name} настроил репозиторий: {repo_url}"
+        timestamp = format_datetime()
+        log_message = f"🔧 Пользователь {user_name} настроил репозиторий: {repo_url} [{timestamp}]"
         await log_to_group(message, log_message)
         
         await state.clear()
@@ -1046,7 +1050,8 @@ async def download_document(message):
         await message.answer("✅ Документ отправлен!", reply_markup=reply_markup)
         # Log document download
         user_name = format_user_name(message)
-        log_message = f"📥 Пользователь {user_name} скачал документ: {doc_name}"
+        timestamp = format_datetime()
+        log_message = f"📥 Пользователь {user_name} скачал документ: {doc_name} [{timestamp}]"
         await log_to_group(message, log_message)
         return
 
@@ -1486,7 +1491,8 @@ async def handle_document_upload(message):
         
         # Log document upload
         user_name = format_user_name(message)
-        log_message = f"📤 Пользователь {user_name} загрузил документ: {doc_name}"
+        timestamp = format_datetime()
+        log_message = f"📤 Пользователь {user_name} загрузил документ: {doc_name} [{timestamp}]"
         await log_to_group(message, log_message)
 
         # Clear upload action but keep document selected in session
@@ -1602,7 +1608,8 @@ async def unlock_document_by_name(message, doc_name: str):
         
         # Log document unlock
         user_name = format_user_name(message)
-        log_message = f"🔓 Пользователь {user_name} разблокировал документ: {doc_name}"
+        timestamp = format_datetime()
+        log_message = f"🔓 Пользователь {user_name} разблокировал документ: {doc_name} [{timestamp}]"
         await log_to_group(message, log_message)
     except subprocess.CalledProcessError as e:
         err_raw = (e.stderr or e.stdout or '')
@@ -1669,7 +1676,8 @@ async def lock_document_by_name(message, doc_name: str):
         
         # Log document lock
         user_name = format_user_name(message)
-        log_message = f"🔒 Пользователь {user_name} заблокировал документ: {doc_name}"
+        timestamp = format_datetime()
+        log_message = f"🔒 Пользователь {user_name} заблокировал документ: {doc_name} [{timestamp}]"
         await log_to_group(message, log_message)
     except subprocess.CalledProcessError as e:
         # If git-lfs locking fails, present the error and fallback to local lock
@@ -1711,7 +1719,8 @@ async def check_lock_status(message):
         
         # Log lock status check
         user_name = format_user_name(message)
-        log_message = f"🔒 Администратор {user_name} проверил статус всех блокировок (git-lfs)"
+        timestamp = format_datetime()
+        log_message = f"🔒 Администратор {user_name} проверил статус всех блокировок (git-lfs) [{timestamp}]"
         await log_to_group(message, log_message)
     except subprocess.CalledProcessError as e:
         await message.answer(f"❌ Ошибка получения статуса блокировок: {str(e)[:200]}", reply_markup=get_locks_keyboard(user_id=message.from_user.id))
@@ -1866,7 +1875,8 @@ async def update_repository(message):
         
         # Log repository update
         user_name = format_user_name(message)
-        log_message = f"🔄 Пользователь {user_name} обновил репозиторий"
+        timestamp = format_datetime()
+        log_message = f"🔄 Пользователь {user_name} обновил репозиторий [{timestamp}]"
         await log_to_group(message, log_message)
 
     except Exception as e:
@@ -1937,7 +1947,8 @@ async def git_status(message):
         
         # Log git status check
         user_name = format_user_name(message)
-        log_message = f"🔍 Пользователь {user_name} проверил статус Git репозитория"
+        timestamp = format_datetime()
+        log_message = f"🔍 Пользователь {user_name} проверил статус Git репозитория [{timestamp}]"
         await log_to_group(message, log_message)
     except subprocess.CalledProcessError as e:
         err = (e.stderr or e.stdout or '')
@@ -1969,8 +1980,6 @@ async def repo_info(message):
     # Формируем информацию (заголовок уже будет добавлен автоматически через PTBMessageAdapter)
     info_text = f"ℹ️ Дополнительная информация:\n\n"
     info_text += f"🔗 Удаленный URL: {repo_url}\n\n"
-    info_text += f"📁 Локальная папка репозитория:\n`{abs_repo_path}`\n\n"
-    info_text += f"📄 Папка с документами:\n`{abs_docs_path}`\n\n"
     
     # Проверяем статус подключения
     if repo_root.exists() and (repo_root / '.git').exists():
@@ -1988,7 +1997,8 @@ async def repo_info(message):
     
     # Log repo info check
     user_name = format_user_name(message)
-    log_message = f"ℹ️ Пользователь {user_name} запросил информацию о репозитории"
+    timestamp = format_datetime()
+    log_message = f"ℹ️ Пользователь {user_name} запросил информацию о репозитории [{timestamp}]"
     await log_to_group(message, log_message)
 
 
@@ -2083,7 +2093,8 @@ async def commit_all_changes(message):
             
         # Log commit operation
         user_name = format_user_name(message)
-        log_message = f"💾 Пользователь {user_name} закоммитил и отправил изменения в репозиторий"
+        timestamp = format_datetime()
+        log_message = f"💾 Пользователь {user_name} закоммитил и отправил изменения в репозиторий [{timestamp}]"
         await log_to_group(message, log_message)
             
     except subprocess.CalledProcessError as e:
@@ -2307,7 +2318,8 @@ async def resync_repository(message):
         
         # Log resync operation
         user_name = format_user_name(message)
-        log_message = f"🔄 Пользователь {user_name} пересинхронизировал репозиторий"
+        timestamp = format_datetime()
+        log_message = f"🔄 Пользователь {user_name} пересинхронизировал репозиторий [{timestamp}]"
         await log_to_group(message, log_message)
         
     except subprocess.CalledProcessError as e:
@@ -2548,9 +2560,7 @@ async def main():
             if text == "🧾 Git статус":
                 await git_status(msg)
                 return
-            if text == "💾 Закоммитить все изменения":
-                await commit_all_changes(msg)
-                return
+
             if text == "🔧 Исправить LFS проблемы":
                 await fix_lfs_issues(msg)
                 return
@@ -2580,9 +2590,7 @@ async def main():
             if text == "📤 Загрузить изменения":
                 await upload_changes(msg)
                 return
-            if text == "🧾 Статус документа":
-                await git_status(msg)
-                return
+
             if text == "🔒 Заблокировать":
                 await lock_document(msg)
                 return
