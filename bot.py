@@ -7,7 +7,7 @@ import subprocess
 import json
 import re
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Load environment variables from .env file
 try:
@@ -174,7 +174,7 @@ def save_user_repos(m: dict):
         logging.exception("Failed to save user repos file")
 
 
-def set_user_repo(user_id: int, repo_path: str, repo_url: str = None, username: str = None):
+def set_user_repo(user_id: int, repo_path: str, repo_url: str = None, username: str = None, telegram_username: str = None):
     """Store user repository mapping using composite key: telegram_id:git_username"""
     m = load_user_repos()
     
@@ -187,6 +187,7 @@ def set_user_repo(user_id: int, repo_path: str, repo_url: str = None, username: 
     
     m[composite_key] = {
         'telegram_id': user_id,
+        'telegram_username': telegram_username,
         'git_username': username,
         'repo_path': str(repo_path),
         'repo_url': repo_url,
@@ -217,8 +218,10 @@ def get_user_repo(user_id: int, git_username: str = None):
 
 
 def format_datetime() -> str:
-    """Format current datetime as YYYY-MM-DD HH:MM:SS"""
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """Format current datetime as YYYY-MM-DD HH:MM:SS with UTC+3 offset"""
+    # Add 3 hours for UTC+3
+    utc_plus_3 = datetime.now() + timedelta(hours=3)
+    return utc_plus_3.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def format_user_name(message) -> str:
@@ -800,7 +803,8 @@ async def process_password(message, state=None):
             email = f"{username}@users.noreply.github.com"
             subprocess.run(["git", "config", "user.email", email], cwd=str(repo_dir), check=True, capture_output=True)
         # Save user repo mapping
-        set_user_repo(user_id, str(repo_dir), repo_url=repo_url, username=username)
+        telegram_username = getattr(message.from_user, 'username', None)
+        set_user_repo(user_id, str(repo_dir), repo_url=repo_url, username=username, telegram_username=telegram_username)
         
         # After successful repository setup, list the documents
         await message.answer("✅ Репозиторий успешно настроен!")
@@ -982,21 +986,18 @@ async def handle_doc_selection(message):
         # Get actual lock timestamp (current time since Git LFS doesn't provide real timestamp)
         lock_timestamp = format_datetime()
         
-        # Get lock owner's Telegram username instead of GitHub username
+        # Get lock owner's Telegram username from user_repos
         lock_owner_id = lfs_lock_info.get('owner', 'unknown')
         telegram_username = None
         
         # Try to find user by GitHub username in our user mapping
         for user_id, repo_info in user_repos.items():
             if repo_info.get('git_username') == lock_owner_id:
-                # Found user with matching GitHub username, get their Telegram info
-                try:
-                    # We need to get Telegram username for this user
-                    # For now, we'll display the GitHub username with note
-                    telegram_username = f"@{lock_owner_id}"
-                    break
-                except Exception:
-                    pass
+                # Found user with matching GitHub username, get their Telegram username
+                telegram_username = repo_info.get('telegram_username')
+                if telegram_username and not telegram_username.startswith('@'):
+                    telegram_username = f"@{telegram_username}"
+                break
         
         # Format lock owner display
         if telegram_username:
@@ -1268,11 +1269,10 @@ async def handle_document_upload(message):
         telegram_username = None
         for user_id, repo_info in user_repos.items():
             if repo_info.get('git_username') == lock_owner:
-                try:
-                    telegram_username = f"@{lock_owner}"
-                    break
-                except Exception:
-                    pass
+                telegram_username = repo_info.get('telegram_username')
+                if telegram_username and not telegram_username.startswith('@'):
+                    telegram_username = f"@{telegram_username}"
+                break
         
         # Format lock owner display
         if telegram_username:
@@ -1724,11 +1724,10 @@ async def lock_document_by_name(message, doc_name: str):
             telegram_username = None
             for user_id, repo_info in user_repos.items():
                 if repo_info.get('git_username') == lock_owner:
-                    try:
-                        telegram_username = f"@{lock_owner}"
-                        break
-                    except Exception:
-                        pass
+                    telegram_username = repo_info.get('telegram_username')
+                    if telegram_username and not telegram_username.startswith('@'):
+                        telegram_username = f"@{telegram_username}"
+                    break
             
             # Format lock owner display
             if telegram_username:
