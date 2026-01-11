@@ -2763,7 +2763,7 @@ async def main():
                 globals()['user_edit_sessions'] = user_sessions
                 
                 # Show edit menu again
-                await edit_user_data(msg, session['target_user_id'])
+                await show_user_edit_menu(msg, session['target_user_id'])
                 return
             
             # Работа с документами
