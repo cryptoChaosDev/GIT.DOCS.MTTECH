@@ -3230,6 +3230,11 @@ async def perform_user_repo_setup(message, session, repo_url):
         if user_repo:
             logging.info(f"Repo path: {user_repo.get('repo_path')}")
         
+        # Check if user_repo is valid
+        if not user_repo:
+            await message.answer("❌ Ошибка создания записи пользователя. Обратитесь к администратору.")
+            return
+        
         # Get repository path
         repo_path = Path(user_repo['repo_path'])
         
