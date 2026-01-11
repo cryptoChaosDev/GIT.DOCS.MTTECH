@@ -2629,6 +2629,9 @@ async def main():
         async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = (update.message.text or "").strip()
             msg = PTBMessageAdapter(update, context)
+            
+            # DEBUG: Log all incoming text
+            print(f"DEBUG: Received text: '{text}'")
 
             # Handle command-like text (commands that start with /)
             if text.startswith('/'):
