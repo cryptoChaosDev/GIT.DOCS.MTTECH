@@ -74,6 +74,21 @@ except Exception:
 # Logging to group configuration
 LOG_GROUP_ID = -1003579467282
 
+
+def initialize_persistent_credentials():
+    """Initialize Git credentials from persistent storage on startup"""
+    try:
+        cred_file = Path("/app/data/.git-credentials")
+        if cred_file.exists():
+            # Configure Git to use persistent credentials file
+            subprocess.run(["git", "config", "--global", "credential.helper", f"store --file={cred_file}"], 
+                          capture_output=True)
+            logging.info("Persistent Git credentials initialized")
+        else:
+            logging.info("No persistent credentials found, will create on first user setup")
+    except Exception as e:
+        logging.error(f"Failed to initialize persistent credentials: {e}")
+
 async def log_to_group(message, message_text):
     """Send log messages to the specified group"""
     try:
@@ -270,11 +285,15 @@ def configure_git_with_credentials(repo_path: str, git_username: str, pat: str):
         # Configure credential helper to use stored credentials
         subprocess.run(["git", "config", "credential.helper", "store"], cwd=repo_path, check=True, capture_output=True)
         
-        # Store credentials in the format that Git credential helper expects
+        # Store credentials in persistent data volume
         cred_content = f"https://{git_username}:{pat}@github.com\n"
-        cred_file = Path.home() / ".git-credentials"
+        cred_file = Path("/app/data") / ".git-credentials"
         cred_file.write_text(cred_content)
         cred_file.chmod(0o600)
+        
+        # Also configure Git to use this credential file
+        subprocess.run(["git", "config", "--global", "credential.helper", f"store --file={cred_file}"], 
+                      cwd=repo_path, check=True, capture_output=True)
         
         logging.info(f"Git credentials configured for {git_username}")
         
@@ -2152,14 +2171,45 @@ async def git_status(message):
         await message.answer(f"❌ Ошибка при выполнении git: {err[:200]}", reply_markup=get_git_operations_keyboard(user_id=message.from_user.id))
 
 
+def get_repo_info_keyboard(user_id=None):
+    """Клавиатура для раздела "О репозитории" с кнопкой настройки"""
+    is_admin = False
+    if user_id is not None:
+        try:
+            is_admin = str(user_id) in ADMIN_IDS
+        except Exception:
+            is_admin = False
+    
+    if is_admin:
+        # Admin view with settings
+        keyboard = [
+            ["⚙️ Настроить репозиторий", "⚙️ Настройки"],
+            ["🏠 Главное меню"]
+        ]
+    else:
+        # Regular user view with setup option
+        keyboard = [
+            ["⚙️ Настроить репозиторий"],
+            ["🏠 Главное меню"]
+        ]
+    
+    if PTB_AVAILABLE:
+        return PTBReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+    
+    # Fallback for aiogram
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+
 async def repo_info(message):
-    """Показывает информацию о репозитории. 
-    Примечание: заголовок репозитория добавляется автоматически через PTBMessageAdapter.answer,
-    поэтому здесь выводим только дополнительную информацию."""
+    """Показывает информацию о репозитории и предоставляет возможность настройки."""
     u = get_user_repo(message.from_user.id)
     if not u:
-        # Заголовок не будет добавлен, так как репозиторий не настроен
-        await message.answer("ℹ️ Репозиторий не настроен для вашего пользователя.", reply_markup=get_main_keyboard())
+        # Репозиторий не настроен - предлагаем настройку
+        await message.answer(
+            "ℹ️ Репозиторий не настроен для вашего пользователя.\n\n"
+            '⚙️ Нажмите "Настроить репозиторий" чтобы начать работу.', 
+            reply_markup=get_repo_info_keyboard(message.from_user.id)
+        )
         return
     
     # Получаем информацию о репозитории
@@ -2186,7 +2236,7 @@ async def repo_info(message):
         info_text += f"❌ Репозиторий не найден локально\n"
     
     # Заголовок будет добавлен автоматически через PTBMessageAdapter.answer
-    await message.answer(info_text, reply_markup=get_main_keyboard())
+    await message.answer(info_text, reply_markup=get_repo_info_keyboard(message.from_user.id))
     
     # Log repo info check
     user_name = format_user_name(message)
@@ -2674,6 +2724,9 @@ async def go_back(message, state=None):
     await message.answer("🏠 Главное меню", reply_markup=get_main_keyboard(message.from_user.id))
 
 async def main():
+    # Initialize persistent credentials on startup
+    initialize_persistent_credentials()
+    
     logging.info("GitHub DOCX Document Management Bot запущен!")
     logging.info(f"Репозиторий: {REPO_PATH}")
     # If START_POLLING is explicitly disabled via env var, do not attempt network connection
@@ -2793,8 +2846,9 @@ async def main():
                     globals()['user_edit_sessions'] = user_sessions
                 return
             
-# Handler for "⚙️ Настроить репозиторий" removed for security reasons
-# Users should configure their own repositories
+            if text == "⚙️ Настроить репозиторий":
+                await setup_user_own_repository(msg)
+                return
             
             if text == "💾 Сохранить изменения":
                 await save_user_changes(msg)
@@ -2805,6 +2859,9 @@ async def main():
                 return
             if text == "ℹ️ О репозитории":
                 await repo_info(msg)
+                return
+            if text == "🏠 Главное меню":
+                await msg.answer("🏠 Главное меню", reply_markup=get_main_keyboard(msg.from_user.id))
                 return
             if text == "📖 Инструкции":
                 await show_instructions(msg)
