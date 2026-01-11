@@ -2999,7 +2999,7 @@ async def update_user_field(message, field_name, new_value):
         return
     
     # Update the field in session
-    session['edited_data'][field_name] = new_value
+    session['user_info'][field_name] = new_value
     user_sessions[message.from_user.id] = session
     globals()['user_edit_sessions'] = user_sessions
     
