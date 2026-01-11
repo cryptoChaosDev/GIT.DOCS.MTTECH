@@ -231,6 +231,59 @@ def get_user_repo(user_id: int, git_username: str = None):
     return None
 
 
+def create_basic_user_entry(user_id: int, telegram_username: str = None):
+    """Create basic user entry for new user"""
+    try:
+        user_repos = load_user_repos()
+        
+        # Create basic user structure
+        user_key = str(user_id)
+        repo_path = f"/app/user_repos/{user_id}"
+        
+        user_repos[user_key] = {
+            'telegram_id': user_id,
+            'telegram_username': telegram_username or f"user_{user_id}",
+            'git_username': None,  # Will be set by user later
+            'repo_path': repo_path,
+            'repo_url': None,  # Will be set by user
+            'created_at': datetime.now().isoformat()
+        }
+        
+        save_user_repos(user_repos)
+        
+        logging.info(f"Created basic user entry for user {user_id}")
+        return user_repos[user_key]
+        
+    except Exception as e:
+        logging.error(f"Failed to create basic user entry: {e}")
+        return None
+
+
+def configure_git_with_credentials(repo_path: str, git_username: str, pat: str):
+    """Configure Git with stored credentials"""
+    try:
+        # Set user configuration
+        subprocess.run(["git", "config", "user.name", git_username], cwd=repo_path, check=True, capture_output=True)
+        email = f"{git_username}@users.noreply.github.com"
+        subprocess.run(["git", "config", "user.email", email], cwd=repo_path, check=True, capture_output=True)
+        
+        # Configure credential helper
+        subprocess.run(["git", "config", "credential.helper", "store"], cwd=repo_path, check=True, capture_output=True)
+        
+        # Store credentials
+        cred_content = f"https://{git_username}:{pat}@github.com\n"
+        cred_file = Path(repo_path) / ".git" / "credentials"
+        cred_file.write_text(cred_content)
+        
+        # Set file permissions
+        cred_file.chmod(0o600)
+        
+        logging.info(f"Git credentials stored for user {git_username}")
+        
+    except Exception as e:
+        logging.error(f"Failed to configure Git with credentials: {e}")
+
+
 def configure_git_credentials(repo_path: str, user_id: int = None):
     """Configure Git credentials for repository - user must set their own credentials"""
     try:
@@ -2791,6 +2844,65 @@ async def main():
             user_sessions = globals().get('user_edit_sessions', {})
             session = user_sessions.get(msg.from_user.id)
             
+            # Handle GitHub username collection
+            if session and session.get('collect_git_username'):
+                git_username = text.strip()
+                if git_username.startswith('@'):
+                    git_username = git_username[1:]  # Remove @ prefix
+                
+                # Store username and switch to collecting PAT
+                user_id = session['user_id']
+                user_sessions = globals().get('user_edit_sessions', {})
+                user_sessions[user_id]['git_username'] = git_username
+                user_sessions[user_id]['collect_git_username'] = False
+                user_sessions[user_id]['collect_pat'] = True
+                globals()['user_edit_sessions'] = user_sessions
+                
+                await msg.answer(
+                    f"✅ GitHub username ({git_username}) сохранен!\n\n"
+                    f"🔑 Теперь введите ваш Personal Access Token (PAT) для GitHub:\n"
+                    f"(Создайте его на GitHub: Settings → Developer settings → Personal access tokens)\n\n"
+                    f"⚠️ ВНИМАНИЕ: Это НЕ ваш пароль от GitHub!\n"
+                    f"Токен должен иметь права `repo`"
+                )
+                return
+            
+            # Handle PAT collection
+            if session and session.get('collect_pat'):
+                pat = text.strip()
+                git_username = session['git_username']
+                repo_url = session['repo_url']
+                user_id = session['user_id']
+                
+                # Update user data
+                user_repos = load_user_repos()
+                user_key = str(user_id)
+                
+                if user_key in user_repos:
+                    user_repos[user_key]['git_username'] = git_username
+                    user_repos[user_key]['repo_url'] = repo_url
+                    save_user_repos(user_repos)
+                    
+                    # Configure Git with stored credentials
+                    repo_path = user_repos[user_key]['repo_path']
+                    configure_git_with_credentials(repo_path, git_username, pat)
+                    
+                    # Clear session
+                    user_sessions = globals().get('user_edit_sessions', {})
+                    del user_sessions[msg.from_user.id]
+                    globals()['user_edit_sessions'] = user_sessions
+                    
+                    await msg.answer(
+                        f"✅ Отлично! Репозиторий полностью настроен!\n\n"
+                        f"📁 Репозиторий: {repo_url}\n"
+                        f"👤 GitHub пользователь: {git_username}\n\n"
+                        f"Теперь вы можете работать с документами.\n"
+                        f"Git LFS операции будут использовать сохраненные учетные данные."
+                    )
+                else:
+                    await msg.answer("❌ Ошибка: пользователь не найден в системе.")
+                return
+            
             # Handle user's own repository setup
             if session and session.get('setup_own_repo'):
                 repo_url = text.strip()
@@ -3104,11 +3216,19 @@ async def perform_user_repo_setup(message, session, repo_url):
     try:
         user_id = session['user_id']
         
-        # Get user repository info
+        # Check if user exists, if not - create basic user entry
         user_repo = get_user_repo(user_id)
+        
         if not user_repo:
-            await message.answer("❌ Репозиторий не настроен. Обратитесь к администратору.")
-            return
+            # Create basic user entry for new user
+            await message.answer("🆕 Обнаружен новый пользователь. Создаем базовую запись...")
+            user_repo = create_basic_user_entry(user_id, message.from_user.username)
+            
+        # Debug information
+        logging.info(f"User ID: {user_id}")
+        logging.info(f"User repo found: {user_repo is not None}")
+        if user_repo:
+            logging.info(f"Repo path: {user_repo.get('repo_path')}")
         
         # Get repository path
         repo_path = Path(user_repo['repo_path'])
@@ -3142,14 +3262,17 @@ async def perform_user_repo_setup(message, session, repo_url):
         del user_sessions[message.from_user.id]
         globals()['user_edit_sessions'] = user_sessions
         
+        # Update session to collect GitHub credentials
+        user_sessions = globals().get('user_edit_sessions', {})
+        user_sessions[user_id]['collect_git_username'] = True
+        user_sessions[user_id]['repo_url'] = repo_url  # Store repo URL for later use
+        globals()['user_edit_sessions'] = user_sessions
+        
         await message.answer(
-            f"✅ Ваш репозиторий успешно настроен!\n"
+            f"✅ Репозиторий клонирован!\n"
             f"URL: {repo_url}\n"
             f"Путь: {repo_path}\n\n"
-            f"💡 При первой операции с документами Git запросит ваши учетные данные:\n"
-            f"• Username: ваш GitHub username\n"
-            f"• Password: Personal Access Token (не пароль!)\n\n"
-            f"Создайте PAT на GitHub: Settings → Developer settings → Personal access tokens"
+            f"🔧 Теперь введите ваш GitHub username (без @):"
         )
         
     except subprocess.CalledProcessError as e:
