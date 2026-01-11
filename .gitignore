@@ -4,29 +4,35 @@ __pycache__/
 *$py.class
 *.so
 .Python
-env/
-venv/
-.venv/
-pip-log.txt
-pip-delete-this-directory.txt
-.tox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.log
-.git/modules/
-.pytest_cache/
-.pytest_cache/*
-.pytest_cache/**/*
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# Environment
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Docker
 .env
-.env.local
-.env.dev
-.env.prod
+docker-compose.override.yml
+
+# Data directories (volumes)
+data/
+user_repos/
+logs/
 
 # IDE
 .vscode/
@@ -38,17 +44,7 @@ coverage.xml
 # OS
 .DS_Store
 Thumbs.db
-desktop.ini
 
-# Project specific
-locks.json
-user_repos.json
-user_repos/
-*.log
-
-# SSH keys
-ssh/id_*
-.repo/.ssh/
-.repo/ssh/
-*.pem
-*.key
+# Temporary files
+*.tmp
+*.temp
