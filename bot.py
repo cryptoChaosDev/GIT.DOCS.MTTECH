@@ -547,7 +547,8 @@ def get_main_keyboard(user_id=None):
     
     keyboard = [
         ["📋 Документы"],
-        ["🔄 Git операции"]
+        ["🔄 Git операции"],
+        ["⚙️ Настроить репозиторий"]  # New button for all users
     ]
     
     # Add locks button only for admins
@@ -2677,6 +2678,10 @@ async def main():
                 await msg.answer("⚙️ Настройки репозитория", reply_markup=get_settings_keyboard(msg.from_user.id))
                 return
             
+            if text == "⚙️ Настроить репозиторий":
+                await setup_user_own_repository(msg)
+                return
+            
             # Admin user management
             if text == "👥 Управление пользователями":
                 await show_users_management(msg)
@@ -2715,6 +2720,15 @@ async def main():
                     await msg.answer("Введите новый URL репозитория:")
                     user_sessions[msg.from_user.id]['editing_field'] = 'repo_url'
                     globals()['user_edit_sessions'] = user_sessions
+                return
+            
+            if text == "⚙️ Настроить репозиторий":
+                # Full repository setup/replacement
+                user_sessions = globals().get('user_edit_sessions', {})
+                session = user_sessions.get(msg.from_user.id)
+                if session:
+                    target_user_id = session['target_user_id']
+                    await setup_user_repository(msg, target_user_id)
                 return
             
             if text == "💾 Сохранить изменения":
@@ -2760,6 +2774,24 @@ async def main():
             # Handle user editing input
             user_sessions = globals().get('user_edit_sessions', {})
             session = user_sessions.get(msg.from_user.id)
+            
+            # Handle user's own repository setup
+            if session and session.get('setup_own_repo'):
+                repo_url = text.strip()
+                if repo_url.startswith('https://'):
+                    await perform_user_repo_setup(msg, session, repo_url)
+                else:
+                    await msg.answer("❌ Неверный формат URL. Используйте: https://github.com/username/repository")
+                return
+            
+            # Handle full repository setup mode (admin)
+            if session and session.get('setup_repo_mode'):
+                repo_url = text.strip()
+                if repo_url.startswith('https://'):
+                    await perform_full_repo_setup(msg, session, repo_url)
+                else:
+                    await msg.answer("❌ Неверный формат URL. Используйте: https://github.com/username/repository")
+                return
             
             if session and 'editing_field' in session:
                 field_to_update = session['editing_field']
@@ -2988,6 +3020,7 @@ async def show_user_edit_menu(message, target_user_id):
         ["📱 Изменить Telegram"],
         ["🐙 Изменить GitHub"],
         ["🔗 Изменить репозиторий"],
+        ["⚙️ Настроить репозиторий"],  # New button for full repository setup
         ["💾 Сохранить изменения"],
         ["❌ Отмена"]
     ]
@@ -3049,6 +3082,158 @@ async def update_user_field(message, field_name, new_value):
     
     if field_name != 'repo_url':  # Don't send duplicate message for repo_url
         await message.answer(f"✅ {field_names.get(field_name, field_name)} обновлен на: {new_value}")
+
+
+async def perform_user_repo_setup(message, session, repo_url):
+    """Execute user's own repository setup"""
+    try:
+        user_id = session['user_id']
+        
+        # Get user repository info
+        user_repo = get_user_repo(user_id)
+        if not user_repo:
+            await message.answer("❌ Репозиторий не настроен. Обратитесь к администратору.")
+            return
+        
+        # Get repository path
+        repo_path = Path(user_repo['repo_path'])
+        
+        # Remove old repository if exists
+        if repo_path.exists():
+            import shutil
+            shutil.rmtree(repo_path)
+            await message.answer("🗑️ Старый репозиторий удален")
+        
+        # Clone new repository
+        await message.answer("📥 Клонируем новый репозиторий...")
+        subprocess.run(['git', 'clone', repo_url, str(repo_path)], check=True, capture_output=True)
+        
+        # Update user data
+        user_repos = load_user_repos()
+        # Find user entry and update repo_url
+        for key, repo_info in user_repos.items():
+            if str(repo_info.get('telegram_id')) == str(user_id):
+                user_repos[key]['repo_url'] = repo_url
+                break
+        
+        save_user_repos(user_repos)
+        
+        # Clear session
+        user_sessions = globals().get('user_edit_sessions', {})
+        del user_sessions[message.from_user.id]
+        globals()['user_edit_sessions'] = user_sessions
+        
+        await message.answer(
+            f"✅ Ваш репозиторий успешно настроен!\n"
+            f"URL: {repo_url}\n"
+            f"Путь: {repo_path}\n\n"
+            f"Теперь вы будете видеть документы из нового репозитория."
+        )
+        
+    except subprocess.CalledProcessError as e:
+        error_msg = e.stderr.decode() if e.stderr else str(e)
+        await message.answer(f"❌ Ошибка при клонировании репозитория:\n{error_msg}")
+    except Exception as e:
+        await message.answer(f"❌ Произошла ошибка:\n{str(e)}")
+
+
+async def setup_user_own_repository(message):
+    """Allow user to setup their own repository"""
+    user_id = message.from_user.id
+    
+    await message.answer(
+        "Введите URL вашего репозитория:\n"
+        "Например: https://github.com/username/repository\n\n"
+        "⚠️ ВНИМАНИЕ: Это удалит ваш текущий репозиторий и все локальные изменения!"
+    )
+    
+    # Set up session for user's own repository setup
+    user_sessions = globals().get('user_edit_sessions', {})
+    user_sessions[user_id] = {
+        'user_id': user_id,
+        'setup_own_repo': True  # Flag for user's own repository setup
+    }
+    globals()['user_edit_sessions'] = user_sessions
+
+
+async def perform_full_repo_setup(message, session, repo_url):
+    """Execute full repository replacement"""
+    try:
+        target_user_id = session['target_user_id']
+        user_key = session['user_key']
+        user_info = session['user_info']
+        
+        # Get repository path
+        repo_path = Path(user_info['repo_path'])
+        
+        # Remove old repository if exists
+        if repo_path.exists():
+            import shutil
+            shutil.rmtree(repo_path)
+            await message.answer("🗑️ Старый репозиторий удален")
+        
+        # Clone new repository
+        await message.answer("📥 Клонируем новый репозиторий...")
+        subprocess.run(['git', 'clone', repo_url, str(repo_path)], check=True, capture_output=True)
+        
+        # Update user data
+        user_repos = load_user_repos()
+        user_repos[user_key]['repo_url'] = repo_url
+        save_user_repos(user_repos)
+        
+        # Clear session
+        user_sessions = globals().get('user_edit_sessions', {})
+        del user_sessions[message.from_user.id]
+        globals()['user_edit_sessions'] = user_sessions
+        
+        await message.answer(
+            f"✅ Репозиторий успешно настроен!\n"
+            f"URL: {repo_url}\n"
+            f"Путь: {repo_path}\n\n"
+            f"Теперь пользователь будет видеть документы из нового репозитория."
+        )
+        
+    except subprocess.CalledProcessError as e:
+        error_msg = e.stderr.decode() if e.stderr else str(e)
+        await message.answer(f"❌ Ошибка при клонировании репозитория:\n{error_msg}")
+    except Exception as e:
+        await message.answer(f"❌ Произошла ошибка:\n{str(e)}")
+
+
+async def setup_user_repository(message, target_user_id):
+    """Full repository setup - removes old repo and clones new one"""
+    user_repos = load_user_repos()
+    
+    # Find user
+    user_key = None
+    user_info = None
+    
+    for key, repo_info in user_repos.items():
+        if str(repo_info.get('telegram_id')) == str(target_user_id):
+            user_key = key
+            user_info = repo_info
+            break
+    
+    if not user_info:
+        await message.answer("❌ Пользователь не найден.")
+        return
+    
+    # Ask for repository URL
+    await message.answer(
+        "Введите URL нового репозитория:\n"
+        "Например: https://github.com/username/repository\n\n"
+        "⚠️ ВНИМАНИЕ: Это удалит текущий репозиторий пользователя и все локальные изменения!"
+    )
+    
+    # Set up session for repository setup
+    user_sessions = globals().get('user_edit_sessions', {})
+    user_sessions[message.from_user.id] = {
+        'target_user_id': target_user_id,
+        'user_key': user_key,
+        'user_info': user_info.copy(),
+        'setup_repo_mode': True  # Flag for full repository setup
+    }
+    globals()['user_edit_sessions'] = user_sessions
 
 
 async def save_user_changes(message):
