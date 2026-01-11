@@ -976,6 +976,9 @@ async def handle_doc_selection(message):
         reply_markup = get_document_keyboard(doc_name, is_locked=True, can_unlock=can_unlock, 
                                            current_user_id=message.from_user.id, repo_root=repo_root)
 
+        # Load user repos to find Telegram username
+        user_repos = load_user_repos()
+        
         # Get actual lock timestamp (current time since Git LFS doesn't provide real timestamp)
         lock_timestamp = format_datetime()
         
@@ -1257,6 +1260,9 @@ async def handle_document_upload(message):
     if lfs_locked_by_other:
         lock_owner = lfs_lock_info.get('owner', 'unknown')
         lock_timestamp = format_datetime()
+        
+        # Load user repos to find Telegram username
+        user_repos = load_user_repos()
         
         # Get Telegram username for lock owner
         telegram_username = None
@@ -1710,6 +1716,9 @@ async def lock_document_by_name(message, doc_name: str):
         if lfs_lock_info:
             lock_owner = lfs_lock_info.get('owner', 'unknown')
             lock_timestamp = format_datetime()
+            
+            # Load user repos to find Telegram username
+            user_repos = load_user_repos()
             
             # Get Telegram username for lock owner
             telegram_username = None
