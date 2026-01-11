@@ -976,9 +976,27 @@ async def handle_doc_selection(message):
         reply_markup = get_document_keyboard(doc_name, is_locked=True, can_unlock=can_unlock, 
                                            current_user_id=message.from_user.id, repo_root=repo_root)
 
+        # Format lock owner as Telegram hyperlink
+        lock_owner = lfs_lock_info.get('owner', 'unknown')
+        if lock_owner.startswith('@'):
+            # Already formatted as username
+            owner_display = lock_owner
+        elif lock_owner.isalnum():
+            # Username without @, add it
+            owner_display = f"[ @{lock_owner} ](https://t.me/{lock_owner})"
+        else:
+            # Not a username, show as is
+            owner_display = lock_owner
+        
+        # Get lock timestamp
+        lock_timestamp = lfs_lock_info.get('timestamp', 'unknown')
+        
         message_text = (
             f"📄 {doc_name}\n"
-            f"🔒 Заблокирован через Git LFS: пользователь: {lfs_lock_info.get('owner', 'unknown')}\n"
+            f"🔒 Заблокирован через Git LFS:\n"
+            f"👤 Пользователь: {owner_display}\n"
+            f"🕐 Время блокировки: {lock_timestamp}\n"
+            "\n"
             "Вы можете скачать документ, но не сможете загрузить изменения, пока он заблокирован."
         )
         await message.answer(message_text, reply_markup=reply_markup)
@@ -1227,8 +1245,20 @@ async def handle_document_upload(message):
     # Only check Git LFS locks (local locks removed)
     if lfs_locked_by_other:
         lock_owner = lfs_lock_info.get('owner', 'unknown')
+        lock_timestamp = lfs_lock_info.get('timestamp', 'unknown')
+        
+        # Format lock owner as Telegram hyperlink
+        if lock_owner.startswith('@'):
+            owner_display = lock_owner
+        elif lock_owner.isalnum():
+            owner_display = f"[ @{lock_owner} ](https://t.me/{lock_owner})"
+        else:
+            owner_display = lock_owner
+        
         # Show error but return to document menu
-        error_msg = f"❌ Документ {doc_name} заблокирован другим пользователем (владелец: {lock_owner}). "
+        error_msg = f"❌ Документ {doc_name} заблокирован другим пользователем\n"
+        error_msg += f"👤 Владелец: {owner_display}\n"
+        error_msg += f"🕐 Время блокировки: {lock_timestamp}\n\n"
         
         # Get user info for better error message
         user_repo_info = get_user_repo(message.from_user.id)
@@ -1659,7 +1689,23 @@ async def lock_document_by_name(message, doc_name: str):
     try:
         lfs_lock_info = get_lfs_lock_info(rel, cwd=repo_root)
         if lfs_lock_info:
-            await message.answer(f"❌ Документ {doc_name} уже заблокирован через Git LFS пользователем {lfs_lock_info.get('owner', 'unknown')}!", reply_markup=get_document_keyboard(doc_name, is_locked=True, can_unlock=False))
+            lock_owner = lfs_lock_info.get('owner', 'unknown')
+            lock_timestamp = lfs_lock_info.get('timestamp', 'unknown')
+            
+            # Format lock owner as Telegram hyperlink
+            if lock_owner.startswith('@'):
+                owner_display = lock_owner
+            elif lock_owner.isalnum():
+                owner_display = f"[ @{lock_owner} ](https://t.me/{lock_owner})"
+            else:
+                owner_display = lock_owner
+            
+            message_text = (
+                f"❌ Документ {doc_name} уже заблокирован через Git LFS\n\n"
+                f"👤 Владелец: {owner_display}\n"
+                f"🕐 Время блокировки: {lock_timestamp}"
+            )
+            await message.answer(message_text, reply_markup=get_document_keyboard(doc_name, is_locked=True, can_unlock=False))
             return
     except Exception as e:
         logging.warning(f"Failed to check LFS lock status for {doc_name}: {e}")
