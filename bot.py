@@ -270,8 +270,12 @@ def configure_git_with_credentials(repo_path: str, git_username: str, pat: str):
         # Configure credential helper
         subprocess.run(["git", "config", "credential.helper", "store"], cwd=repo_path, check=True, capture_output=True)
         
+        # Disable LFS locks verification for remotes that don't support it
+        subprocess.run(["git", "config", "lfs.https://github.com/.*/info/lfs.locksverify", "false"], cwd=repo_path, check=True, capture_output=True)
+        
         # Store credentials
         cred_content = f"https://{git_username}:{pat}@github.com\n"
+        cred_content += f"https://github.com\n{git_username}\n{pat}\n"
         cred_file = Path(repo_path) / ".git" / "credentials"
         cred_file.write_text(cred_content)
         
