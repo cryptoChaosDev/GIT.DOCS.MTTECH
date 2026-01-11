@@ -2428,25 +2428,13 @@ async def setup_repository_simple(msg, data):
         if username and password and repo_url:
             repo_url_with_creds = "https://" + username + ":" + password + "@" + repo_url.replace("https://", "")
 
-        # Check if repo already exists
-        repo_exists = (repo_dir / '.git').exists()
-
-        if repo_exists:
-            # Ask user what to do
-            user_config_state[msg.from_user.id] = 'waiting_for_repo_action'
-            await msg.answer(
-                "🔄 У вас уже настроен репозиторий. Что сделать с существующей папкой?\n\n"
-                f"📁 Текущая папка: `{repo_dir}`\n"
-                f"🔗 Новый репозиторий: `{repo_url}`\n\n"
-                "Выберите действие:",
-                reply_markup=ReplyKeyboardMarkup([
-                    ["🔄 Переключиться на новый репозиторий"],
-                    ["🗑️ Удалить старую папку и клонировать заново"],
-                    ["❌ Отмена"]
-                ], resize_keyboard=True)
-            )
-            return
-        else:
+        # For initial setup, always proceed with cloning (no conflict resolution needed)
+        # Remove any existing repo directory to ensure clean setup
+        if repo_dir.exists():
+            import shutil
+            shutil.rmtree(repo_dir, ignore_errors=True)
+        
+        # Proceed with fresh clone
             # Clone new repo
             await handle_repo_action_simple(msg, "auto_clone")
 
