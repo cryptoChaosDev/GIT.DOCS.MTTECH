@@ -976,20 +976,31 @@ async def handle_doc_selection(message):
         reply_markup = get_document_keyboard(doc_name, is_locked=True, can_unlock=can_unlock, 
                                            current_user_id=message.from_user.id, repo_root=repo_root)
 
-        # Format lock owner as Telegram hyperlink
-        lock_owner = lfs_lock_info.get('owner', 'unknown')
-        if lock_owner.startswith('@'):
-            # Already formatted as username
-            owner_display = lock_owner
-        elif lock_owner.isalnum():
-            # Username without @, add it
-            owner_display = f"[ @{lock_owner} ](https://t.me/{lock_owner})"
-        else:
-            # Not a username, show as is
-            owner_display = lock_owner
+        # Get actual lock timestamp (current time since Git LFS doesn't provide real timestamp)
+        lock_timestamp = format_datetime()
         
-        # Get lock timestamp
-        lock_timestamp = lfs_lock_info.get('timestamp', 'unknown')
+        # Get lock owner's Telegram username instead of GitHub username
+        lock_owner_id = lfs_lock_info.get('owner', 'unknown')
+        telegram_username = None
+        
+        # Try to find user by GitHub username in our user mapping
+        for user_id, repo_info in user_repos.items():
+            if repo_info.get('git_username') == lock_owner_id:
+                # Found user with matching GitHub username, get their Telegram info
+                try:
+                    # We need to get Telegram username for this user
+                    # For now, we'll display the GitHub username with note
+                    telegram_username = f"@{lock_owner_id}"
+                    break
+                except Exception:
+                    pass
+        
+        # Format lock owner display
+        if telegram_username:
+            owner_display = f"[ {telegram_username} ](https://t.me/{telegram_username.lstrip('@')})"
+        else:
+            # Fallback to GitHub username with note
+            owner_display = f"{lock_owner_id} (GitHub username)"
         
         message_text = (
             f"📄 {doc_name}\n"
@@ -1245,15 +1256,23 @@ async def handle_document_upload(message):
     # Only check Git LFS locks (local locks removed)
     if lfs_locked_by_other:
         lock_owner = lfs_lock_info.get('owner', 'unknown')
-        lock_timestamp = lfs_lock_info.get('timestamp', 'unknown')
+        lock_timestamp = format_datetime()
         
-        # Format lock owner as Telegram hyperlink
-        if lock_owner.startswith('@'):
-            owner_display = lock_owner
-        elif lock_owner.isalnum():
-            owner_display = f"[ @{lock_owner} ](https://t.me/{lock_owner})"
+        # Get Telegram username for lock owner
+        telegram_username = None
+        for user_id, repo_info in user_repos.items():
+            if repo_info.get('git_username') == lock_owner:
+                try:
+                    telegram_username = f"@{lock_owner}"
+                    break
+                except Exception:
+                    pass
+        
+        # Format lock owner display
+        if telegram_username:
+            owner_display = f"[ {telegram_username} ](https://t.me/{telegram_username.lstrip('@')})"
         else:
-            owner_display = lock_owner
+            owner_display = f"{lock_owner} (GitHub username)"
         
         # Show error but return to document menu
         error_msg = f"❌ Документ {doc_name} заблокирован другим пользователем\n"
@@ -1690,15 +1709,23 @@ async def lock_document_by_name(message, doc_name: str):
         lfs_lock_info = get_lfs_lock_info(rel, cwd=repo_root)
         if lfs_lock_info:
             lock_owner = lfs_lock_info.get('owner', 'unknown')
-            lock_timestamp = lfs_lock_info.get('timestamp', 'unknown')
+            lock_timestamp = format_datetime()
             
-            # Format lock owner as Telegram hyperlink
-            if lock_owner.startswith('@'):
-                owner_display = lock_owner
-            elif lock_owner.isalnum():
-                owner_display = f"[ @{lock_owner} ](https://t.me/{lock_owner})"
+            # Get Telegram username for lock owner
+            telegram_username = None
+            for user_id, repo_info in user_repos.items():
+                if repo_info.get('git_username') == lock_owner:
+                    try:
+                        telegram_username = f"@{lock_owner}"
+                        break
+                    except Exception:
+                        pass
+            
+            # Format lock owner display
+            if telegram_username:
+                owner_display = f"[ {telegram_username} ](https://t.me/{telegram_username.lstrip('@')})"
             else:
-                owner_display = lock_owner
+                owner_display = f"{lock_owner} (GitHub username)"
             
             message_text = (
                 f"❌ Документ {doc_name} уже заблокирован через Git LFS\n\n"
