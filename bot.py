@@ -2629,14 +2629,23 @@ async def main():
             msg = PTBMessageAdapter(update, context)
             command = update.message.text.strip()
             
+            # Debug output
+            print(f"DEBUG: Received command: {command}")
+            
             # Extract user ID from command
             if command.startswith('/edit_user_'):
                 try:
-                    target_user_id = command.split('_')[2]
-                    await edit_user_data(msg, target_user_id)
-                except (IndexError, ValueError):
-                    await msg.answer("❌ Неверный формат команды. Используйте: /edit_user_ID")
+                    target_user_id = command.replace('/edit_user_', '')
+                    print(f"DEBUG: Extracted user ID: {target_user_id}")
+                    if target_user_id.isdigit():
+                        await edit_user_data(msg, target_user_id)
+                    else:
+                        await msg.answer("❌ Неверный формат ID. Используйте цифры.")
+                except Exception as e:
+                    await msg.answer(f"❌ Ошибка: {str(e)}")
+                    print(f"DEBUG: Error processing command: {e}")
         
+        # Handle both /edit_user and /edit_user_{ID} commands
         app.add_handler(CommandHandler('edit_user', edit_user_command))
 
         # Direct text handlers map to existing functions via adapter
@@ -2930,19 +2939,25 @@ async def show_users_management(message):
 
 async def edit_user_data(message, target_user_id):
     """Edit specific user data"""
+    print(f"DEBUG: edit_user_data called with target_user_id: {target_user_id}")
+    
     user_repos = load_user_repos()
+    print(f"DEBUG: Loaded user_repos with {len(user_repos)} entries")
     
     # Find user by ID
     user_key = None
     user_info = None
     
     for key, repo_info in user_repos.items():
+        print(f"DEBUG: Checking key: {key}, telegram_id: {repo_info.get('telegram_id')}")
         if str(repo_info.get('telegram_id')) == str(target_user_id):
             user_key = key
             user_info = repo_info
+            print(f"DEBUG: Found user! Key: {user_key}")
             break
     
     if not user_info:
+        print(f"DEBUG: User {target_user_id} not found in user_repos")
         await message.answer("❌ Пользователь не найден.", 
                            reply_markup=get_settings_keyboard(message.from_user.id))
         return
