@@ -604,13 +604,7 @@ class UserConfigStates:
 
 # Create keyboard
 def get_main_keyboard(user_id=None):
-    """Главное меню - основной экран бота"""
-    # Check if user already has a configured repository
-    has_repo = False
-    if user_id:
-        user_repo = get_user_repo(user_id)
-        has_repo = user_repo is not None
-
+    """Главное меню - улучшенная структура с логической группировкой"""
     # Check if user is admin
     is_admin = False
     if user_id is not None:
@@ -619,22 +613,22 @@ def get_main_keyboard(user_id=None):
         except Exception:
             is_admin = False
     
-    keyboard = [
-        ["📋 Документы"],
-        ["🔄 Git операции"],
-        ["⚙️ Настроить репозиторий"]  # New button for all users
-    ]
-    
-    # Add locks button only for admins
     if is_admin:
-        keyboard[1].append("🔒 Блокировки")
-
-    # Only show settings if repository is not configured OR if user_id is None (backward compatibility)
-    if not has_repo or user_id is None:
-        keyboard.append(["⚙️ Настройки"])
-
-    # Always show repository info and instructions
-    keyboard.append(["ℹ️ О репозитории", "📖 Инструкции"])
+        # Admin view - grouped by functionality
+        keyboard = [
+            ["📂 Документы"],  # Document operations
+            ["🔧 Git операции", "🔒 Блокировки"],  # Git operations with admin functions
+            ["ℹ️ О репозитории", "⚙️ Настройки"],  # Repository info and settings
+            ["📖 Инструкции"]  # Help section
+        ]
+    else:
+        # Regular user view - simplified and focused
+        keyboard = [
+            ["📂 Документы"],  # Main document operations
+            ["🔧 Git операции"],  # Git operations without admin functions
+            ["ℹ️ О репозитории"],  # Repository info with setup option
+            ["📖 Инструкции"]  # Help section
+        ]
 
     if PTB_AVAILABLE:
         return PTBReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
@@ -2705,12 +2699,11 @@ async def main():
             msg = PTBMessageAdapter(update, context)
             await msg.answer(
                 "🤖 Добро пожаловать в систему управления документами!\n\n"
-                "📋 Документы - работа с документами\n"
-                "🔄 Git операции - обновление и коммиты\n"
-                "🔒 Блокировки - управление блокировками\n"
-                "⚙️ Настройки - настройка репозитория\n"
-                "ℹ️ О репозитории - информация о репозитории\n\n"
-                "Для начала работы настройте репозиторий в разделе ⚙️ Настройки.",
+                "📂 Документы - работа с документами и блокировками\n"
+                "🔧 Git операции - обновление и коммиты\n"
+                "ℹ️ О репозитории - информация и настройка репозитория\n"
+                "📖 Инструкции - помощь и руководство\n\n"
+                "Для начала работы настройте репозиторий в разделе ℹ️ О репозитории.",
                 reply_markup=get_main_keyboard(msg.from_user.id)
             )
 
@@ -2743,11 +2736,11 @@ async def main():
                     return
             
             # Главное меню
-            if text == "📋 Документы":
+            if text == "📂 Документы":
                 await list_documents(msg)
                 return
-            if text == "🔄 Git операции":
-                await msg.answer("🔄 Git операции", reply_markup=get_git_operations_keyboard(user_id=msg.from_user.id))
+            if text == "🔧 Git операции":
+                await msg.answer("🔧 Git операции", reply_markup=get_git_operations_keyboard(user_id=msg.from_user.id))
                 return
             if text == "🔒 Блокировки":
                 await msg.answer("🔒 Управление блокировками", reply_markup=get_locks_keyboard(user_id=msg.from_user.id))
