@@ -2939,6 +2939,10 @@ async def show_user_edit_menu(message, target_user_id):
     """Show user editing menu with buttons"""
     user_repos = load_user_repos()
     
+    # Check if there's an active editing session
+    user_sessions = globals().get('user_edit_sessions', {})
+    session = user_sessions.get(message.from_user.id, {})
+    
     # Find user by ID
     user_info = None
     user_key = None
@@ -2954,12 +2958,15 @@ async def show_user_edit_menu(message, target_user_id):
                            reply_markup=get_settings_keyboard(message.from_user.id))
         return
     
+    # Use session data if available, otherwise use file data
+    display_info = session.get('user_info', user_info) if session.get('target_user_id') == str(target_user_id) else user_info
+    
     # Show current data
     current_data = f"📝 Редактирование пользователя ID: {target_user_id}\n\n"
     current_data += "Текущие данные:\n"
-    current_data += f"📱 Telegram: @{user_info.get('telegram_username', 'не задан')}\n"
-    current_data += f"🐙 GitHub: {user_info.get('git_username', 'не задан')}\n"
-    current_data += f"🔗 Репозиторий: {user_info.get('repo_url', 'не задан')}\n\n"
+    current_data += f"📱 Telegram: @{display_info.get('telegram_username', 'не задан')}\n"
+    current_data += f"🐙 GitHub: {display_info.get('git_username', 'не задан')}\n"
+    current_data += f"🔗 Репозиторий: {display_info.get('repo_url', 'не задан')}\n\n"
     current_data += "Выберите поле для изменения:"
     
     # Create editing buttons
@@ -3030,7 +3037,7 @@ async def save_user_changes(message):
         # Update the user data
         target_key = session['user_key']
         if target_key in user_repos:
-            user_repos[target_key] = session['edited_data']
+            user_repos[target_key] = session['user_info']
             
             # Save changes
             save_user_repos(user_repos)
