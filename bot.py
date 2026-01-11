@@ -260,36 +260,26 @@ def create_basic_user_entry(user_id: int, telegram_username: str = None):
 
 
 def configure_git_with_credentials(repo_path: str, git_username: str, pat: str):
-    """Configure Git with stored credentials"""
+    """Configure Git with stored credentials - simple approach that worked before"""
     try:
         # Set user configuration
         subprocess.run(["git", "config", "user.name", git_username], cwd=repo_path, check=True, capture_output=True)
         email = f"{git_username}@users.noreply.github.com"
         subprocess.run(["git", "config", "user.email", email], cwd=repo_path, check=True, capture_output=True)
         
-        # Configure credential helper
+        # Configure credential helper to use stored credentials
         subprocess.run(["git", "config", "credential.helper", "store"], cwd=repo_path, check=True, capture_output=True)
         
-        # Disable LFS locks verification for remotes that don't support it
-        subprocess.run(["git", "config", "lfs.https://github.com/.*/info/lfs.locksverify", "false"], cwd=repo_path, check=True, capture_output=True)
-        
-        # Store credentials
+        # Store credentials in the format that Git credential helper expects
         cred_content = f"https://{git_username}:{pat}@github.com\n"
-        cred_content += f"https://github.com\n{git_username}\n{pat}\n"
-        cred_file = Path(repo_path) / ".git" / "credentials"
+        cred_file = Path.home() / ".git-credentials"
         cred_file.write_text(cred_content)
-        
-        # Log credential file content for debugging
-        logging.info(f"Credentials saved to: {cred_file}")
-        logging.info(f"Credentials content: {cred_content}")
-        
-        # Set file permissions
         cred_file.chmod(0o600)
         
-        logging.info(f"Git credentials stored for user {git_username}")
+        logging.info(f"Git credentials configured for {git_username}")
         
     except Exception as e:
-        logging.error(f"Failed to configure Git with credentials: {e}")
+        logging.error(f"Failed to configure Git credentials: {e}")
 
 
 def configure_git_credentials(repo_path: str, user_id: int = None):
@@ -518,24 +508,8 @@ def _clear_action(user_id):
 def get_lfs_lock_info(doc_rel_path: str, cwd: Path = REPO_PATH):
     """Return lock info for a path according to `git lfs locks` output or None. cwd specifies repository root."""
     try:
-        # Try to get user ID from cwd path to set proper credentials
-        user_id = None
-        if str(cwd).startswith('/app/user_repos/'):
-            try:
-                user_id = int(str(cwd).split('/')[3])
-            except (ValueError, IndexError):
-                pass
-        
-        # Set environment variables for Git authentication
-        env = os.environ.copy()
-        if user_id:
-            user_repo_info = get_user_repo(user_id)
-            git_username = user_repo_info.get('git_username') if user_repo_info else None
-            if git_username:
-                env['GIT_ASKPASS'] = '/bin/echo'
-                env['GIT_USERNAME'] = git_username
-        
-        proc = subprocess.run(["git", "lfs", "locks"], cwd=str(cwd), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace', env=env)
+        # Simple call - credentials are stored globally
+        proc = subprocess.run(["git", "lfs", "locks"], cwd=str(cwd), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
         out = proc.stdout or ""
         # Parse Git LFS locks output format: "path    owner    timestamp"
         for line in out.splitlines():
@@ -965,16 +939,8 @@ async def process_password(message, state=None):
                 # Get current user's repo path
                 user_repo_path = get_repo_for_user_id(message.from_user.id)
                 if user_repo_path and user_repo_path.exists():
-                    # Get all LFS locks with proper authentication
-                    user_repo_info = get_user_repo(message.from_user.id)
-                    git_username = user_repo_info.get('git_username') if user_repo_info else None
-                    
-                    env = os.environ.copy()
-                    if git_username:
-                        env['GIT_ASKPASS'] = '/bin/echo'
-                        env['GIT_USERNAME'] = git_username
-                    
-                    proc = subprocess.run(["git", "lfs", "locks"], cwd=str(user_repo_path), capture_output=True, text=True, encoding='utf-8', errors='replace', env=env)
+                    # Get all LFS locks - credentials stored globally
+                    proc = subprocess.run(["git", "lfs", "locks"], cwd=str(user_repo_path), capture_output=True, text=True, encoding='utf-8', errors='replace')
                     if proc.returncode == 0:
                         for line in proc.stdout.splitlines():
                             if line.strip():
@@ -1052,15 +1018,8 @@ async def list_documents(message):
             except Exception as e:
                 logging.error(f"Error checking remote URL for user {message.from_user.id}: {e}")
             
-            # Get LFS locks with proper authentication
-            git_username = user_repo_info.get('git_username') if user_repo_info else None
-            
-            env = os.environ.copy()
-            if git_username:
-                env['GIT_ASKPASS'] = '/bin/echo'
-                env['GIT_USERNAME'] = git_username
-            
-            proc = subprocess.run(["git", "lfs", "locks"], cwd=str(user_repo_path), capture_output=True, text=True, encoding='utf-8', errors='replace', env=env)
+            # Get LFS locks - credentials stored globally
+            proc = subprocess.run(["git", "lfs", "locks"], cwd=str(user_repo_path), capture_output=True, text=True, encoding='utf-8', errors='replace')
             logging.info(f"LFS locks command result for user {message.from_user.id}: returncode={proc.returncode}, stdout={proc.stdout[:200]}, stderr={proc.stderr[:200] if proc.stderr else 'none'}")
             
             if proc.returncode == 0:
@@ -1906,18 +1865,8 @@ async def lock_document_by_name(message, doc_name: str):
     # Try to lock via git-lfs first (so others see it)
     rel = str((Path('docs') / doc_name).as_posix())
     try:
-        # Get user credentials for Git operations
-        user_repo_info = get_user_repo(message.from_user.id)
-        git_username = user_repo_info.get('git_username') if user_repo_info else None
-        
-        # Set environment variables for Git authentication
-        env = os.environ.copy()
-        if git_username:
-            env['GIT_ASKPASS'] = '/bin/echo'
-            env['GIT_USERNAME'] = git_username
-            # Note: We can't easily pass password via env, so we rely on stored credentials
-        
-        proc = subprocess.run(["git", "lfs", "lock", rel], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace', env=env)
+        # Simple call - credentials are stored globally
+        proc = subprocess.run(["git", "lfs", "lock", rel], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
         # Git LFS lock created successfully - no local lock needed
         # Return to document menu
         reply_markup = get_document_keyboard(doc_name, is_locked=True, can_unlock=True)
@@ -1959,16 +1908,8 @@ async def check_lock_status(message):
         repo_root = await require_user_repo(message)
         if not repo_root:
             return
-        # Get LFS locks with proper authentication
-        user_repo_info = get_user_repo(message.from_user.id)
-        git_username = user_repo_info.get('git_username') if user_repo_info else None
-        
-        env = os.environ.copy()
-        if git_username:
-            env['GIT_ASKPASS'] = '/bin/echo'
-            env['GIT_USERNAME'] = git_username
-        
-        proc = subprocess.run(["git", "lfs", "locks"], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace', env=env)
+        # Get LFS locks - credentials stored globally
+        proc = subprocess.run(["git", "lfs", "locks"], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
         out = (proc.stdout or "").strip()
         if not out:
             await message.answer("🔓 Нет активных блокировок (git-lfs)", reply_markup=get_locks_keyboard(user_id=message.from_user.id))
@@ -2462,16 +2403,8 @@ async def fix_lfs_issues(message):
         # Step 3: Check LFS locks status
         await message.answer("3️⃣ Проверяю LFS блокировки...")
         try:
-            # Get LFS locks with proper authentication
-            user_repo_info = get_user_repo(message.from_user.id)
-            git_username = user_repo_info.get('git_username') if user_repo_info else None
-            
-            env = os.environ.copy()
-            if git_username:
-                env['GIT_ASKPASS'] = '/bin/echo'
-                env['GIT_USERNAME'] = git_username
-            
-            locks_result = subprocess.run(["git", "lfs", "locks"], cwd=str(repo_root), capture_output=True, timeout=30, env=env)
+            # Get LFS locks - credentials stored globally
+            locks_result = subprocess.run(["git", "lfs", "locks"], cwd=str(repo_root), capture_output=True, timeout=30)
             if locks_result.returncode == 0 and locks_result.stdout.strip():
                 locks_output = locks_result.stdout.decode('utf-8', errors='replace') if isinstance(locks_result.stdout, bytes) else locks_result.stdout
                 await message.answer(f"🔒 Активные блокировки:\n{locks_output[:200]}")
