@@ -1003,8 +1003,8 @@ async def handle_doc_selection(message):
         if telegram_username:
             owner_display = f"[ {telegram_username} ](https://t.me/{telegram_username.lstrip('@')})"
         else:
-            # Fallback to GitHub username with note
-            owner_display = f"{lock_owner_id} (GitHub username)"
+            # Fallback to GitHub profile link
+            owner_display = f"[ {lock_owner_id} ](https://github.com/{lock_owner_id})"
         
         message_text = (
             f"📄 {doc_name}\n"
@@ -1278,7 +1278,8 @@ async def handle_document_upload(message):
         if telegram_username:
             owner_display = f"[ {telegram_username} ](https://t.me/{telegram_username.lstrip('@')})"
         else:
-            owner_display = f"{lock_owner} (GitHub username)"
+            # Fallback to GitHub profile link
+            owner_display = f"[ {lock_owner} ](https://github.com/{lock_owner})"
         
         # Show error but return to document menu
         error_msg = f"❌ Документ {doc_name} заблокирован другим пользователем\n"
@@ -1733,7 +1734,8 @@ async def lock_document_by_name(message, doc_name: str):
             if telegram_username:
                 owner_display = f"[ {telegram_username} ](https://t.me/{telegram_username.lstrip('@')})"
             else:
-                owner_display = f"{lock_owner} (GitHub username)"
+                # Fallback to GitHub profile link
+                owner_display = f"[ {lock_owner} ](https://github.com/{lock_owner})"
             
             message_text = (
                 f"❌ Документ {doc_name} уже заблокирован через Git LFS\n\n"
