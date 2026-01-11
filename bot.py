@@ -2633,9 +2633,13 @@ async def main():
             # DEBUG: Log all incoming text
             print(f"DEBUG: Received text: '{text}'")
 
+            # DEBUG: Check if we reach this point
+            print(f"DEBUG: Processing text: '{text}'")
+            
             # Handle command-like text (commands that start with /)
             if text.startswith('/'):
                 # Handle /edit_user_{ID} commands
+                print(f"DEBUG: Found command starting with /, checking if it's /edit_user_")
                 if text.startswith('/edit_user_'):
                     try:
                         target_user_id = text.replace('/edit_user_', '')
