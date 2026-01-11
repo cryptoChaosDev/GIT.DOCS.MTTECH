@@ -712,11 +712,23 @@ def get_settings_keyboard(user_id=None):
         user_repo = get_user_repo(user_id)
         has_repo = user_repo is not None
 
+    # Check if user is admin
+    is_admin = False
+    if user_id is not None:
+        try:
+            is_admin = str(user_id) in ADMIN_IDS
+        except Exception:
+            is_admin = False
+    
     keyboard_buttons = []
 
     # Only show repository setup if no repository is configured OR if user_id is None (backward compatibility)
     if not has_repo or user_id is None:
         keyboard_buttons.append("🔧 Настроить репозиторий")
+    
+    # Admin functions
+    if is_admin:
+        keyboard_buttons.append("👥 Управление пользователями")
 
     keyboard_buttons.append("◀️ Назад в главное меню")
 
@@ -2610,6 +2622,22 @@ async def main():
             )
 
         app.add_handler(CommandHandler('start', start_ptb))
+        
+        # Add handler for user edit commands
+        async def edit_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            """Handle /edit_user_{ID} commands"""
+            msg = PTBMessageAdapter(update, context)
+            command = update.message.text.strip()
+            
+            # Extract user ID from command
+            if command.startswith('/edit_user_'):
+                try:
+                    target_user_id = command.split('_')[2]
+                    await edit_user_data(msg, target_user_id)
+                except (IndexError, ValueError):
+                    await msg.answer("❌ Неверный формат команды. Используйте: /edit_user_ID")
+        
+        app.add_handler(CommandHandler('edit_user', edit_user_command))
 
         # Direct text handlers map to existing functions via adapter
         async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2628,6 +2656,54 @@ async def main():
                 return
             if text == "⚙️ Настройки":
                 await msg.answer("⚙️ Настройки репозитория", reply_markup=get_settings_keyboard(msg.from_user.id))
+                return
+            
+            # Admin user management
+            if text == "👥 Управление пользователями":
+                await show_users_management(msg)
+                return
+            
+            if text == "🔄 Обновить список":
+                await show_users_management(msg)
+                return
+            
+            # User editing field handlers
+            if text.startswith("📱 Изменить Telegram"):
+                # Ask for new Telegram username
+                user_sessions = globals().get('user_edit_sessions', {})
+                session = user_sessions.get(msg.from_user.id)
+                if session:
+                    await msg.answer("Введите новый Telegram username (без @):")
+                    user_sessions[msg.from_user.id]['editing_field'] = 'telegram_username'
+                    globals()['user_edit_sessions'] = user_sessions
+                return
+            
+            if text.startswith("🐙 Изменить GitHub"):
+                # Ask for new GitHub username
+                user_sessions = globals().get('user_edit_sessions', {})
+                session = user_sessions.get(msg.from_user.id)
+                if session:
+                    await msg.answer("Введите новый GitHub username:")
+                    user_sessions[msg.from_user.id]['editing_field'] = 'git_username'
+                    globals()['user_edit_sessions'] = user_sessions
+                return
+            
+            if text.startswith("🔗 Изменить репозиторий"):
+                # Ask for new repository URL
+                user_sessions = globals().get('user_edit_sessions', {})
+                session = user_sessions.get(msg.from_user.id)
+                if session:
+                    await msg.answer("Введите новый URL репозитория:")
+                    user_sessions[msg.from_user.id]['editing_field'] = 'repo_url'
+                    globals()['user_edit_sessions'] = user_sessions
+                return
+            
+            if text == "💾 Сохранить изменения":
+                await save_user_changes(msg)
+                return
+            
+            if text == "◀️ Назад к списку":
+                await show_users_management(msg)
                 return
             if text == "ℹ️ О репозитории":
                 await repo_info(msg)
@@ -2662,6 +2738,29 @@ async def main():
                 await msg.answer("Введите URL репозитория (например, https://github.com/user/repo):")
                 return
 
+            # Handle user editing input
+            user_sessions = globals().get('user_edit_sessions', {})
+            session = user_sessions.get(msg.from_user.id)
+            
+            if session and 'editing_field' in session:
+                field_to_update = session['editing_field']
+                new_value = text.strip()
+                
+                # Remove @ prefix if present for Telegram username
+                if field_to_update == 'telegram_username' and new_value.startswith('@'):
+                    new_value = new_value[1:]
+                
+                await update_user_field(msg, field_to_update, new_value)
+                
+                # Remove editing flag
+                del session['editing_field']
+                user_sessions[msg.from_user.id] = session
+                globals()['user_edit_sessions'] = user_sessions
+                
+                # Show edit menu again
+                await edit_user_data(msg, session['target_user_id'])
+                return
+            
             # Работа с документами
             if text.startswith("📄 ") or text.startswith("📄🔒 "):
                 # Выбор документа из списка (включая заблокированные документы)
@@ -2788,6 +2887,162 @@ async def show_instructions(message):
 Нужна помощь? Обратитесь к официальной документации GitHub!"""
     
     await message.answer(instructions, reply_markup=get_main_keyboard())
+
+# === Admin User Management Functions ===
+
+async def show_users_management(message):
+    """Show list of all users with configured repositories"""
+    user_repos = load_user_repos()
+    
+    if not user_repos:
+        await message.answer("📭 Нет пользователей с настроенными репозиториями.", 
+                           reply_markup=get_settings_keyboard(message.from_user.id))
+        return
+    
+    # Build user list
+    user_list = "👥 Пользователи с настроенными репозиториями:\n\n"
+    
+    for key, repo_info in user_repos.items():
+        telegram_id = repo_info.get('telegram_id', 'unknown')
+        telegram_username = repo_info.get('telegram_username', 'не задан')
+        git_username = repo_info.get('git_username', 'не задан')
+        repo_url = repo_info.get('repo_url', 'не задан')
+        
+        user_list += f"👤 ID: {telegram_id}\n"
+        user_list += f"   📱 Telegram: @{telegram_username}\n"
+        user_list += f"   🐙 GitHub: {git_username}\n"
+        user_list += f"   🔗 Репозиторий: {repo_url}\n"
+        user_list += f"   📝 Редактировать: /edit_user_{telegram_id}\n\n"
+    
+    # Add navigation buttons
+    keyboard = [
+        ["🔄 Обновить список"],
+        ["◀️ Назад в настройки"]
+    ]
+    
+    if PTB_AVAILABLE:
+        reply_markup = PTBReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+    else:
+        reply_markup = keyboard
+    
+    await message.answer(user_list, reply_markup=reply_markup)
+
+
+async def edit_user_data(message, target_user_id):
+    """Edit specific user data"""
+    user_repos = load_user_repos()
+    
+    # Find user by ID
+    user_key = None
+    user_info = None
+    
+    for key, repo_info in user_repos.items():
+        if str(repo_info.get('telegram_id')) == str(target_user_id):
+            user_key = key
+            user_info = repo_info
+            break
+    
+    if not user_info:
+        await message.answer("❌ Пользователь не найден.", 
+                           reply_markup=get_settings_keyboard(message.from_user.id))
+        return
+    
+    # Show current data and editing options
+    current_data = f"📝 Редактирование пользователя ID: {target_user_id}\n\n"
+    current_data += f"📱 Telegram username: {user_info.get('telegram_username', 'не задан')}\n"
+    current_data += f"🐙 GitHub username: {user_info.get('git_username', 'не задан')}\n"
+    current_data += f"🔗 Репозиторий: {user_info.get('repo_url', 'не задан')}\n\n"
+    current_data += "Выберите что изменить:"
+    
+    # Editing options
+    keyboard = [
+        [f"📱 Изменить Telegram (@{user_info.get('telegram_username', 'не задан')})"],
+        [f"🐙 Изменить GitHub ({user_info.get('git_username', 'не задан')})"],
+        [f"🔗 Изменить репозиторий ({'задан' if user_info.get('repo_url') else 'не задан'})"],
+        ["💾 Сохранить изменения"],
+        ["◀️ Назад к списку"]
+    ]
+    
+    if PTB_AVAILABLE:
+        reply_markup = PTBReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+    else:
+        reply_markup = keyboard
+    
+    # Store current user data in session for editing
+    user_sessions = globals().get('user_edit_sessions', {})
+    user_sessions[message.from_user.id] = {
+        'target_user_id': target_user_id,
+        'user_key': user_key,
+        'original_data': user_info.copy(),
+        'edited_data': user_info.copy()
+    }
+    globals()['user_edit_sessions'] = user_sessions
+    
+    await message.answer(current_data, reply_markup=reply_markup)
+
+
+async def update_user_field(message, field_name, new_value):
+    """Update specific field for user in user_repos"""
+    user_sessions = globals().get('user_edit_sessions', {})
+    session = user_sessions.get(message.from_user.id)
+    
+    if not session:
+        await message.answer("❌ Сессия редактирования не найдена. Начните заново.",
+                           reply_markup=get_settings_keyboard(message.from_user.id))
+        return
+    
+    # Update the field in session
+    session['edited_data'][field_name] = new_value
+    user_sessions[message.from_user.id] = session
+    globals()['user_edit_sessions'] = user_sessions
+    
+    # Confirm update
+    field_names = {
+        'telegram_username': 'Telegram username',
+        'git_username': 'GitHub username',
+        'repo_url': 'URL репозитория'
+    }
+    
+    await message.answer(f"✅ {field_names.get(field_name, field_name)} обновлен на: {new_value}")
+
+
+async def save_user_changes(message):
+    """Save all user changes to user_repos.json"""
+    user_sessions = globals().get('user_edit_sessions', {})
+    session = user_sessions.get(message.from_user.id)
+    
+    if not session:
+        await message.answer("❌ Сессия редактирования не найдена.",
+                           reply_markup=get_settings_keyboard(message.from_user.id))
+        return
+    
+    try:
+        # Load current user_repos
+        user_repos = load_user_repos()
+        
+        # Update the user data
+        target_key = session['user_key']
+        if target_key in user_repos:
+            user_repos[target_key] = session['edited_data']
+            
+            # Save changes
+            save_user_repos(user_repos)
+            
+            await message.answer("✅ Изменения успешно сохранены!",
+                               reply_markup=get_settings_keyboard(message.from_user.id))
+        else:
+            await message.answer("❌ Пользователь не найден в базе данных.",
+                               reply_markup=get_settings_keyboard(message.from_user.id))
+            
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при сохранении: {str(e)}",
+                           reply_markup=get_settings_keyboard(message.from_user.id))
+    
+    # Clear session
+    if message.from_user.id in user_sessions:
+        del user_sessions[message.from_user.id]
+        globals()['user_edit_sessions'] = user_sessions
+
 
 if __name__ == "__main__":
     asyncio.run(main())
