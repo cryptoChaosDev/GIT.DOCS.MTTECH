@@ -518,7 +518,24 @@ def _clear_action(user_id):
 def get_lfs_lock_info(doc_rel_path: str, cwd: Path = REPO_PATH):
     """Return lock info for a path according to `git lfs locks` output or None. cwd specifies repository root."""
     try:
-        proc = subprocess.run(["git", "lfs", "locks"], cwd=str(cwd), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        # Try to get user ID from cwd path to set proper credentials
+        user_id = None
+        if str(cwd).startswith('/app/user_repos/'):
+            try:
+                user_id = int(str(cwd).split('/')[3])
+            except (ValueError, IndexError):
+                pass
+        
+        # Set environment variables for Git authentication
+        env = os.environ.copy()
+        if user_id:
+            user_repo_info = get_user_repo(user_id)
+            git_username = user_repo_info.get('git_username') if user_repo_info else None
+            if git_username:
+                env['GIT_ASKPASS'] = '/bin/echo'
+                env['GIT_USERNAME'] = git_username
+        
+        proc = subprocess.run(["git", "lfs", "locks"], cwd=str(cwd), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace', env=env)
         out = proc.stdout or ""
         # Parse Git LFS locks output format: "path    owner    timestamp"
         for line in out.splitlines():
@@ -948,8 +965,16 @@ async def process_password(message, state=None):
                 # Get current user's repo path
                 user_repo_path = get_repo_for_user_id(message.from_user.id)
                 if user_repo_path and user_repo_path.exists():
-                    # Get all LFS locks
-                    proc = subprocess.run(["git", "lfs", "locks"], cwd=str(user_repo_path), capture_output=True, text=True, encoding='utf-8', errors='replace')
+                    # Get all LFS locks with proper authentication
+                    user_repo_info = get_user_repo(message.from_user.id)
+                    git_username = user_repo_info.get('git_username') if user_repo_info else None
+                    
+                    env = os.environ.copy()
+                    if git_username:
+                        env['GIT_ASKPASS'] = '/bin/echo'
+                        env['GIT_USERNAME'] = git_username
+                    
+                    proc = subprocess.run(["git", "lfs", "locks"], cwd=str(user_repo_path), capture_output=True, text=True, encoding='utf-8', errors='replace', env=env)
                     if proc.returncode == 0:
                         for line in proc.stdout.splitlines():
                             if line.strip():
@@ -1027,7 +1052,15 @@ async def list_documents(message):
             except Exception as e:
                 logging.error(f"Error checking remote URL for user {message.from_user.id}: {e}")
             
-            proc = subprocess.run(["git", "lfs", "locks"], cwd=str(user_repo_path), capture_output=True, text=True, encoding='utf-8', errors='replace')
+            # Get LFS locks with proper authentication
+            git_username = user_repo_info.get('git_username') if user_repo_info else None
+            
+            env = os.environ.copy()
+            if git_username:
+                env['GIT_ASKPASS'] = '/bin/echo'
+                env['GIT_USERNAME'] = git_username
+            
+            proc = subprocess.run(["git", "lfs", "locks"], cwd=str(user_repo_path), capture_output=True, text=True, encoding='utf-8', errors='replace', env=env)
             logging.info(f"LFS locks command result for user {message.from_user.id}: returncode={proc.returncode}, stdout={proc.stdout[:200]}, stderr={proc.stderr[:200] if proc.stderr else 'none'}")
             
             if proc.returncode == 0:
@@ -1926,7 +1959,16 @@ async def check_lock_status(message):
         repo_root = await require_user_repo(message)
         if not repo_root:
             return
-        proc = subprocess.run(["git", "lfs", "locks"], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        # Get LFS locks with proper authentication
+        user_repo_info = get_user_repo(message.from_user.id)
+        git_username = user_repo_info.get('git_username') if user_repo_info else None
+        
+        env = os.environ.copy()
+        if git_username:
+            env['GIT_ASKPASS'] = '/bin/echo'
+            env['GIT_USERNAME'] = git_username
+        
+        proc = subprocess.run(["git", "lfs", "locks"], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace', env=env)
         out = (proc.stdout or "").strip()
         if not out:
             await message.answer("🔓 Нет активных блокировок (git-lfs)", reply_markup=get_locks_keyboard(user_id=message.from_user.id))
@@ -2420,7 +2462,16 @@ async def fix_lfs_issues(message):
         # Step 3: Check LFS locks status
         await message.answer("3️⃣ Проверяю LFS блокировки...")
         try:
-            locks_result = subprocess.run(["git", "lfs", "locks"], cwd=str(repo_root), capture_output=True, timeout=30)
+            # Get LFS locks with proper authentication
+            user_repo_info = get_user_repo(message.from_user.id)
+            git_username = user_repo_info.get('git_username') if user_repo_info else None
+            
+            env = os.environ.copy()
+            if git_username:
+                env['GIT_ASKPASS'] = '/bin/echo'
+                env['GIT_USERNAME'] = git_username
+            
+            locks_result = subprocess.run(["git", "lfs", "locks"], cwd=str(repo_root), capture_output=True, timeout=30, env=env)
             if locks_result.returncode == 0 and locks_result.stdout.strip():
                 locks_output = locks_result.stdout.decode('utf-8', errors='replace') if isinstance(locks_result.stdout, bytes) else locks_result.stdout
                 await message.answer(f"🔒 Активные блокировки:\n{locks_output[:200]}")
