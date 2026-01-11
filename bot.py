@@ -2623,36 +2623,32 @@ async def main():
 
         app.add_handler(CommandHandler('start', start_ptb))
         
-        # Add handler for user edit commands
-        async def edit_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            """Handle /edit_user_{ID} commands"""
-            msg = PTBMessageAdapter(update, context)
-            command = update.message.text.strip()
-            
-            # Debug output
-            print(f"DEBUG: Received command: {command}")
-            
-            # Extract user ID from command
-            if command.startswith('/edit_user_'):
-                try:
-                    target_user_id = command.replace('/edit_user_', '')
-                    print(f"DEBUG: Extracted user ID: {target_user_id}")
-                    if target_user_id.isdigit():
-                        await edit_user_data(msg, target_user_id)
-                    else:
-                        await msg.answer("❌ Неверный формат ID. Используйте цифры.")
-                except Exception as e:
-                    await msg.answer(f"❌ Ошибка: {str(e)}")
-                    print(f"DEBUG: Error processing command: {e}")
-        
-        # Handle both /edit_user and /edit_user_{ID} commands
-        app.add_handler(CommandHandler('edit_user', edit_user_command))
+# Command handler removed - using text router instead
 
         # Direct text handlers map to existing functions via adapter
         async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = (update.message.text or "").strip()
             msg = PTBMessageAdapter(update, context)
 
+            # Handle command-like text (commands that start with /)
+            if text.startswith('/'):
+                # Handle /edit_user_{ID} commands
+                if text.startswith('/edit_user_'):
+                    try:
+                        target_user_id = text.replace('/edit_user_', '')
+                        if target_user_id.isdigit():
+                            await edit_user_data(msg, target_user_id)
+                        else:
+                            await msg.answer("❌ Неверный формат ID. Используйте: /edit_user_123456789")
+                        return
+                    except Exception as e:
+                        await msg.answer(f"❌ Ошибка обработки команды: {str(e)}")
+                        return
+                # Handle other commands here if needed
+                else:
+                    await msg.answer("❓ Неизвестная команда")
+                    return
+            
             # Главное меню
             if text == "📋 Документы":
                 await list_documents(msg)
