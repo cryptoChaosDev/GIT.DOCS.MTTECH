@@ -279,6 +279,10 @@ def configure_git_with_credentials(repo_path: str, git_username: str, pat: str):
         cred_file = Path(repo_path) / ".git" / "credentials"
         cred_file.write_text(cred_content)
         
+        # Log credential file content for debugging
+        logging.info(f"Credentials saved to: {cred_file}")
+        logging.info(f"Credentials content: {cred_content}")
+        
         # Set file permissions
         cred_file.chmod(0o600)
         
@@ -1869,7 +1873,18 @@ async def lock_document_by_name(message, doc_name: str):
     # Try to lock via git-lfs first (so others see it)
     rel = str((Path('docs') / doc_name).as_posix())
     try:
-        proc = subprocess.run(["git", "lfs", "lock", rel], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        # Get user credentials for Git operations
+        user_repo_info = get_user_repo(message.from_user.id)
+        git_username = user_repo_info.get('git_username') if user_repo_info else None
+        
+        # Set environment variables for Git authentication
+        env = os.environ.copy()
+        if git_username:
+            env['GIT_ASKPASS'] = '/bin/echo'
+            env['GIT_USERNAME'] = git_username
+            # Note: We can't easily pass password via env, so we rely on stored credentials
+        
+        proc = subprocess.run(["git", "lfs", "lock", rel], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace', env=env)
         # Git LFS lock created successfully - no local lock needed
         # Return to document menu
         reply_markup = get_document_keyboard(doc_name, is_locked=True, can_unlock=True)
