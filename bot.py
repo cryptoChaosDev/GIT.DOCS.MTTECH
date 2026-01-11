@@ -3262,12 +3262,7 @@ async def perform_user_repo_setup(message, session, repo_url):
         
         save_user_repos(user_repos)
         
-        # Clear session
-        user_sessions = globals().get('user_edit_sessions', {})
-        del user_sessions[message.from_user.id]
-        globals()['user_edit_sessions'] = user_sessions
-        
-        # Update session to collect GitHub credentials
+        # Update session to collect GitHub credentials BEFORE clearing
         user_sessions = globals().get('user_edit_sessions', {})
         user_sessions[user_id]['collect_git_username'] = True
         user_sessions[user_id]['repo_url'] = repo_url  # Store repo URL for later use
