@@ -76,18 +76,26 @@ LOG_GROUP_ID = -1003579467282
 
 
 def initialize_persistent_credentials():
-    """Initialize Git credentials from persistent storage on startup"""
+    """Initialize personal Git credentials system on startup"""
     try:
-        cred_file = Path("/app/data/.git-credentials")
-        if cred_file.exists():
-            # Configure Git to use persistent credentials file
-            subprocess.run(["git", "config", "--global", "credential.helper", f"store --file={cred_file}"], 
-                          capture_output=True)
-            logging.info("Persistent Git credentials initialized")
+        data_dir = Path("/app/data")
+        # Look for existing personal credential files
+        personal_cred_files = list(data_dir.glob(".git-credentials-*"))
+        
+        if personal_cred_files:
+            logging.info(f"Found {len(personal_cred_files)} personal credential files")
+            # Each repository will use its own credential file configured during setup
         else:
-            logging.info("No persistent credentials found, will create on first user setup")
+            logging.info("No personal credentials found, will create on first user setup")
+            
+        # Clean up old global credential file if exists
+        old_cred_file = data_dir / ".git-credentials"
+        if old_cred_file.exists():
+            old_cred_file.unlink()
+            logging.info("Removed old global credential file")
+            
     except Exception as e:
-        logging.error(f"Failed to initialize persistent credentials: {e}")
+        logging.error(f"Failed to initialize personal credentials system: {e}")
 
 async def log_to_group(message, message_text):
     """Send log messages to the specified group"""
@@ -274,31 +282,33 @@ def create_basic_user_entry(user_id: int, telegram_username: str = None):
         return None
 
 
-def configure_git_with_credentials(repo_path: str, git_username: str, pat: str):
-    """Configure Git with stored credentials - simple approach that worked before"""
+def configure_git_with_credentials(repo_path: str, git_username: str, pat: str, user_id: int = None):
+    """Configure Git with personal credentials for specific user"""
     try:
         # Set user configuration
         subprocess.run(["git", "config", "user.name", git_username], cwd=repo_path, check=True, capture_output=True)
         email = f"{git_username}@users.noreply.github.com"
         subprocess.run(["git", "config", "user.email", email], cwd=repo_path, check=True, capture_output=True)
         
-        # Configure credential helper to use stored credentials
-        subprocess.run(["git", "config", "credential.helper", "store"], cwd=repo_path, check=True, capture_output=True)
-        
-        # Store credentials in persistent data volume
+        # Create personal credential file for this user
+        if user_id:
+            cred_filename = f".git-credentials-{user_id}"
+        else:
+            cred_filename = ".git-credentials-default"
+            
+        cred_file = Path("/app/data") / cred_filename
         cred_content = f"https://{git_username}:{pat}@github.com\n"
-        cred_file = Path("/app/data") / ".git-credentials"
         cred_file.write_text(cred_content)
         cred_file.chmod(0o600)
         
-        # Also configure Git to use this credential file
-        subprocess.run(["git", "config", "--global", "credential.helper", f"store --file={cred_file}"], 
+        # Configure Git to use personal credential file for this repository only
+        subprocess.run(["git", "config", "credential.helper", f"store --file={cred_file}"], 
                       cwd=repo_path, check=True, capture_output=True)
         
-        logging.info(f"Git credentials configured for {git_username}")
+        logging.info(f"Personal Git credentials configured for user {user_id} ({git_username})")
         
     except Exception as e:
-        logging.error(f"Failed to configure Git credentials: {e}")
+        logging.error(f"Failed to configure personal Git credentials: {e}")
 
 
 def configure_git_credentials(repo_path: str, user_id: int = None):
@@ -2724,7 +2734,7 @@ async def go_back(message, state=None):
     await message.answer("🏠 Главное меню", reply_markup=get_main_keyboard(message.from_user.id))
 
 async def main():
-    # Initialize persistent credentials on startup
+    # Initialize personal credentials system on startup
     initialize_persistent_credentials()
     
     logging.info("GitHub DOCX Document Management Bot запущен!")
@@ -2936,9 +2946,9 @@ async def main():
                     user_repos[user_key]['repo_url'] = repo_url
                     save_user_repos(user_repos)
                     
-                    # Configure Git with stored credentials
+                    # Configure Git with personal credentials
                     repo_path = user_repos[user_key]['repo_path']
-                    configure_git_with_credentials(repo_path, git_username, pat)
+                    configure_git_with_credentials(repo_path, git_username, pat, user_id)
                     
                     # Clear session
                     user_sessions = globals().get('user_edit_sessions', {})
