@@ -1293,20 +1293,45 @@ async def handle_document_upload(message):
         return
 
     # First check if this is actually a document upload
-    logging.info(f"Message type check: has document attr: {hasattr(message, 'document')}, document: {getattr(message, 'document', None)}")
+    logging.info(f"=== DEBUG MESSAGE STRUCTURE ===")
+    logging.info(f"Message type: {type(message)}")
+    logging.info(f"Has document attr: {hasattr(message, 'document')}")
+    logging.info(f"Document object: {getattr(message, 'document', None)}")
+    logging.info(f"Has caption attr: {hasattr(message, 'caption')}")
+    logging.info(f"Caption value: {getattr(message, 'caption', 'NOT_FOUND')}")
+    logging.info(f"Has text attr: {hasattr(message, 'text')}")
+    logging.info(f"Text value: {getattr(message, 'text', 'NOT_FOUND')}")
+    logging.info(f"All message attrs: {dir(message)}")
+    if hasattr(message, 'document') and message.document:
+        logging.info(f"Document has caption: {hasattr(message.document, 'caption')}")
+        logging.info(f"Document caption: {getattr(message.document, 'caption', 'NOT_FOUND')}")
+        logging.info(f"Document attrs: {dir(message.document)}")
+    logging.info(f"=== END DEBUG ===")
     
     if not hasattr(message, 'document') or not message.document:
         # Check if this might be a text message sent after "Upload changes"
         if hasattr(message, 'text') and message.text:
-            await message.answer(
-                f"❌ Вы отправили текстовое сообщение: '{message.text}'\n\n"
-                "❗ Нужно отправить именно **файл .docx**, а не текст!\n\n"
-                "📥 Правильный порядок:\n"
-                "1. Нажмите скрепку/прикрепить файл\n"
-                "2. Выберите файл .docx из файловой системы\n"
-                "3. Добавьте описание (caption) к файлу\n"
-                "4. Отправьте файл"
-            )
+            # Store text as pending caption for next document upload
+            session = user_doc_sessions.get(message.from_user.id, {})
+            if session.get('action') == 'upload':
+                session['pending_caption'] = message.text.strip()
+                user_doc_sessions[message.from_user.id] = session
+                logging.info(f"Stored pending caption for next upload: {repr(message.text)}")
+                await message.answer(
+                    f"✅ Сохранен комментарий: '{message.text}'\n\n"
+                    "Теперь отправьте **файл .docx** (не текст!), и этот комментарий будет использован для коммита."
+                )
+                return
+            else:
+                await message.answer(
+                    f"❌ Вы отправили текстовое сообщение: '{message.text}'\n\n"
+                    "❗ Нужно отправить именно **файл .docx**, а не текст!\n\n"
+                    "📥 Правильный порядок:\n"
+                    "1. Нажмите скрепку/прикрепить файл\n"
+                    "2. Выберите файл .docx из файловой системы\n"
+                    "3. Добавьте описание (caption) к файлу\n"
+                    "4. Отправьте файл"
+                )
         else:
             await message.answer(
                 "❌ Пожалуйста, отправьте файл .docx, а не текстовое сообщение!\n\n"
@@ -1317,23 +1342,28 @@ async def handle_document_upload(message):
     # Check for mandatory commit message (caption/description)
     # Try multiple sources for caption
     caption = None
-    
-    # Source 1: Message caption (main source)
-    caption = getattr(message, 'caption', None)
-    logging.info(f"Message caption: {repr(caption)}")
-    
-    # Source 2: Document caption (alternative source)
+        
+    # Source 1: Check for pending caption from previous text message
+    session = user_doc_sessions.get(message.from_user.id, {})
+    if session.get('action') == 'upload' and 'pending_caption' in session:
+        caption = session['pending_caption']
+        logging.info(f"Using pending caption from session: {repr(caption)}")
+        # Clear pending caption
+        del session['pending_caption']
+        user_doc_sessions[message.from_user.id] = session
+        
+    # Source 2: Message caption (main source)
+    if not caption:
+        caption = getattr(message, 'caption', None)
+        logging.info(f"Message caption: {repr(caption)}")
+        
+    # Source 3: Document caption (alternative source)
     if not caption and hasattr(message.document, 'caption'):
         doc_caption = getattr(message.document, 'caption', None)
         logging.info(f"Document caption: {repr(doc_caption)}")
         if doc_caption and doc_caption.strip():
             caption = doc_caption
-    
-    # Source 3: Text field (some clients put caption here)
-    if not caption and hasattr(message, 'text') and message.text:
-        caption = message.text
-        logging.info(f"Using message text as caption: {repr(caption)}")
-    
+        
     logging.info(f"Final caption value: {repr(caption)}")
     
     if not caption or not caption.strip():
