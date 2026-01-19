@@ -1292,12 +1292,19 @@ async def handle_document_upload(message):
     if not repo_root:
         return
 
-    # Check for mandatory commit message (caption)
+    # Check for mandatory commit message (caption/description)
     caption = getattr(message, 'caption', None)
+    # Also check if document has caption (for some Telegram clients)
+    if hasattr(message, 'document') and hasattr(message.document, 'caption'):
+        doc_caption = getattr(message.document, 'caption', None)
+        if doc_caption and doc_caption.strip():
+            caption = doc_caption
+    
     if not caption or not caption.strip():
         await message.answer(
             "❌ Обязательно укажите комментарий к изменениям!\n\n"
-            "📝 Введите описание изменений в поле Caption при отправке файла.\n"
+            "📝 В Telegram Desktop: при отправке файла кликните на файл -> выберите 'Add a description' -> введите комментарий\n"
+            "📱 В мобильном Telegram: при отправке файла введите текст в поле описания под файлом\n\n"
             "Этот комментарий будет записан в историю коммитов для сохранения истории изменений."
         )
         return
