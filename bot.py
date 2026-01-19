@@ -1292,6 +1292,15 @@ async def handle_document_upload(message):
     if not repo_root:
         return
 
+    # Check for mandatory commit message (caption)
+    if not message.caption or not message.caption.strip():
+        await message.answer(
+            "❌ Обязательно укажите комментарий к изменениям!\n\n"
+            "📝 Введите описание изменений в поле Caption при отправке файла.\n"
+            "Этот комментарий будет записан в историю коммитов для сохранения истории изменений."
+        )
+        return
+
     if not message.document or not message.document.file_name:
         await message.answer("❌ Файл не найден.")
         return
@@ -1565,7 +1574,9 @@ async def handle_document_upload(message):
         commit_created = False
         if has_changes:
             user_name = format_user_name(message)
-            commit_result = subprocess.run(["git", "commit", "-m", f"Update {doc_name} by {user_name}"], 
+            # Use user's caption as commit message if provided, otherwise use default
+            commit_message = message.caption.strip() if message.caption else f"Update {doc_name} by {user_name}"
+            commit_result = subprocess.run(["git", "commit", "-m", commit_message], 
                           cwd=str(repo_root), capture_output=True, text=True, encoding='utf-8', errors='replace')
             if commit_result.returncode == 0:
                 commit_created = True
