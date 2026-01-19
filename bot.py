@@ -1315,12 +1315,26 @@ async def handle_document_upload(message):
         return
 
     # Check for mandatory commit message (caption/description)
+    # Try multiple sources for caption
+    caption = None
+    
+    # Source 1: Message caption (main source)
     caption = getattr(message, 'caption', None)
-    # Also check if document has caption (for some Telegram clients)
-    if hasattr(message.document, 'caption'):
+    logging.info(f"Message caption: {repr(caption)}")
+    
+    # Source 2: Document caption (alternative source)
+    if not caption and hasattr(message.document, 'caption'):
         doc_caption = getattr(message.document, 'caption', None)
+        logging.info(f"Document caption: {repr(doc_caption)}")
         if doc_caption and doc_caption.strip():
             caption = doc_caption
+    
+    # Source 3: Text field (some clients put caption here)
+    if not caption and hasattr(message, 'text') and message.text:
+        caption = message.text
+        logging.info(f"Using message text as caption: {repr(caption)}")
+    
+    logging.info(f"Final caption value: {repr(caption)}")
     
     if not caption or not caption.strip():
         await message.answer(
