@@ -1306,6 +1306,19 @@ async def handle_document_upload(message):
         logging.info(f"Document has caption: {hasattr(message.document, 'caption')}")
         logging.info(f"Document caption: {getattr(message.document, 'caption', 'NOT_FOUND')}")
         logging.info(f"Document attrs: {dir(message.document)}")
+    
+    # Check update object
+    if hasattr(message, 'update'):
+        logging.info(f"Update type: {type(message.update)}")
+        logging.info(f"Update has caption: {hasattr(message.update, 'caption')}")
+        logging.info(f"Update caption: {getattr(message.update, 'caption', 'NOT_FOUND')}")
+        if hasattr(message.update, 'to_dict'):
+            update_dict = message.update.to_dict()
+            logging.info(f"Update dict sample: {str(update_dict)[:200]}...")
+            logging.info(f"Update dict has caption key: {'caption' in update_dict}")
+            if 'caption' in update_dict:
+                logging.info(f"Update dict caption: {repr(update_dict['caption'])}")
+    
     logging.info(f"=== END DEBUG ===")
     
     if not hasattr(message, 'document') or not message.document:
@@ -1356,6 +1369,23 @@ async def handle_document_upload(message):
     if not caption:
         caption = getattr(message, 'caption', None)
         logging.info(f"Message caption: {repr(caption)}")
+        
+        # Additional check: maybe caption is in update or context?
+        if not caption and hasattr(message, 'update'):
+            update_caption = getattr(message.update, 'caption', None)
+            logging.info(f"Update caption: {repr(update_caption)}")
+            if update_caption:
+                caption = update_caption
+        
+        # Check if caption might be in message entities or other fields
+        if not caption:
+            # Try to get raw update data
+            if hasattr(message, 'update') and hasattr(message.update, 'to_dict'):
+                update_dict = message.update.to_dict()
+                logging.info(f"Update dict keys: {list(update_dict.keys())}")
+                if 'caption' in update_dict:
+                    caption = update_dict['caption']
+                    logging.info(f"Found caption in update dict: {repr(caption)}")
         
     # Source 3: Document caption (alternative source)
     if not caption and hasattr(message.document, 'caption'):
