@@ -1293,7 +1293,8 @@ async def handle_document_upload(message):
         return
 
     # Check for mandatory commit message (caption)
-    if not message.caption or not message.caption.strip():
+    caption = getattr(message, 'caption', None)
+    if not caption or not caption.strip():
         await message.answer(
             "❌ Обязательно укажите комментарий к изменениям!\n\n"
             "📝 Введите описание изменений в поле Caption при отправке файла.\n"
@@ -1575,7 +1576,7 @@ async def handle_document_upload(message):
         if has_changes:
             user_name = format_user_name(message)
             # Use user's caption as commit message if provided, otherwise use default
-            commit_message = message.caption.strip() if message.caption else f"Update {doc_name} by {user_name}"
+            commit_message = caption.strip() if caption else f"Update {doc_name} by {user_name}"
             commit_result = subprocess.run(["git", "commit", "-m", commit_message], 
                           cwd=str(repo_root), capture_output=True, text=True, encoding='utf-8', errors='replace')
             if commit_result.returncode == 0:
