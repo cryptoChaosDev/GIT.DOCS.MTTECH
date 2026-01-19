@@ -1292,10 +1292,18 @@ async def handle_document_upload(message):
     if not repo_root:
         return
 
+    # First check if this is actually a document upload
+    if not hasattr(message, 'document') or not message.document:
+        await message.answer(
+            "❌ Пожалуйста, отправьте файл .docx, а не текстовое сообщение!\n\n"
+            "📥 Нажмите скрепку -> выберите файл .docx -> добавьте описание (caption) -> отправьте"
+        )
+        return
+
     # Check for mandatory commit message (caption/description)
     caption = getattr(message, 'caption', None)
     # Also check if document has caption (for some Telegram clients)
-    if hasattr(message, 'document') and hasattr(message.document, 'caption'):
+    if hasattr(message.document, 'caption'):
         doc_caption = getattr(message.document, 'caption', None)
         if doc_caption and doc_caption.strip():
             caption = doc_caption
