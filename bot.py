@@ -1692,8 +1692,23 @@ async def handle_document_upload(message):
         commit_created = False
         if has_changes:
             user_name = format_user_name(message)
-            # Use user's caption as commit message if provided, otherwise use default
-            commit_message = caption.strip() if caption else f"Update {doc_name} by {user_name}"
+            # Use enhanced commit message format with user info and timestamp
+            if caption:
+                # Enhanced format with user info and t.me link
+                telegram_username = getattr(message.from_user, 'username', None)
+                if telegram_username:
+                    user_link = f"[{telegram_username}](https://t.me/{telegram_username})"
+                else:
+                    user_link = f"User {message.from_user.id}"
+                timestamp = format_datetime()  # Already includes +3h offset
+                
+                commit_message = (
+                    f"{caption.strip()}\n\n"
+                    f"Кто изменил: {user_link}\n"
+                    f"Дата/Время изменения: {timestamp}"
+                )
+            else:
+                commit_message = f"Update {doc_name} by {user_name}"
             commit_result = subprocess.run(["git", "commit", "-m", commit_message], 
                           cwd=str(repo_root), capture_output=True, text=True, encoding='utf-8', errors='replace')
             if commit_result.returncode == 0:
