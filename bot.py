@@ -1293,11 +1293,25 @@ async def handle_document_upload(message):
         return
 
     # First check if this is actually a document upload
+    logging.info(f"Message type check: has document attr: {hasattr(message, 'document')}, document: {getattr(message, 'document', None)}")
+    
     if not hasattr(message, 'document') or not message.document:
-        await message.answer(
-            "❌ Пожалуйста, отправьте файл .docx, а не текстовое сообщение!\n\n"
-            "📥 Нажмите скрепку -> выберите файл .docx -> добавьте описание (caption) -> отправьте"
-        )
+        # Check if this might be a text message sent after "Upload changes"
+        if hasattr(message, 'text') and message.text:
+            await message.answer(
+                f"❌ Вы отправили текстовое сообщение: '{message.text}'\n\n"
+                "❗ Нужно отправить именно **файл .docx**, а не текст!\n\n"
+                "📥 Правильный порядок:\n"
+                "1. Нажмите скрепку/прикрепить файл\n"
+                "2. Выберите файл .docx из файловой системы\n"
+                "3. Добавьте описание (caption) к файлу\n"
+                "4. Отправьте файл"
+            )
+        else:
+            await message.answer(
+                "❌ Пожалуйста, отправьте файл .docx, а не текстовое сообщение!\n\n"
+                "📥 Нажмите скрепку -> выберите файл .docx -> добавьте описание (caption) -> отправьте"
+            )
         return
 
     # Check for mandatory commit message (caption/description)
