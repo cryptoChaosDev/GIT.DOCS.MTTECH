@@ -1314,10 +1314,19 @@ async def handle_document_upload(message):
         logging.info(f"Update caption: {getattr(message.update, 'caption', 'NOT_FOUND')}")
         if hasattr(message.update, 'to_dict'):
             update_dict = message.update.to_dict()
-            logging.info(f"Update dict sample: {str(update_dict)[:200]}...")
+            logging.info(f"Update dict sample: {str(update_dict)[:500]}")  # Больше данных
             logging.info(f"Update dict has caption key: {'caption' in update_dict}")
             if 'caption' in update_dict:
                 logging.info(f"Update dict caption: {repr(update_dict['caption'])}")
+            
+            # Check message object inside update
+            if 'message' in update_dict:
+                msg_dict = update_dict['message']
+                logging.info(f"Message dict keys: {list(msg_dict.keys())}")
+                logging.info(f"Message dict sample: {str(msg_dict)[:300]}")
+                if 'caption' in msg_dict:
+                    logging.info(f"FOUND CAPTION IN MESSAGE DICT: {repr(msg_dict['caption'])}")
+                    caption = msg_dict['caption']  # Найден caption!
     
     logging.info(f"=== END DEBUG ===")
     
@@ -1386,6 +1395,11 @@ async def handle_document_upload(message):
                 if 'caption' in update_dict:
                     caption = update_dict['caption']
                     logging.info(f"Found caption in update dict: {repr(caption)}")
+                
+                # Check message object inside update (most likely place)
+                if 'message' in update_dict and 'caption' in update_dict['message']:
+                    caption = update_dict['message']['caption']
+                    logging.info(f"FOUND AND SET CAPTION FROM MESSAGE DICT: {repr(caption)}")
         
     # Source 3: Document caption (alternative source)
     if not caption and hasattr(message.document, 'caption'):
