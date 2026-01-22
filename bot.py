@@ -1675,7 +1675,8 @@ def get_current_user_context():
     return None
 
 def get_lock_info_via_gitlab_api(doc_rel_path: str, cwd: Path = REPO_PATH, user_id: int = None):
-    """Get lock information via GitLab's /users/locks/activity API endpoint"""
+    """Get lock information via GitLab's /users/locks/activity API endpoint
+    If doc_rel_path is None, returns all locks"""
     try:
         # Get user_id from parameter or context
         if not user_id:
@@ -1756,15 +1757,19 @@ def get_lock_info_via_gitlab_api(doc_rel_path: str, cwd: Path = REPO_PATH, user_
         if response.status_code == 200:
             locks_data = response.json()
             
-            # Find lock for our specific file
-            for lock in locks_data:
-                if lock.get('path') == doc_rel_path:
-                    return {
-                        "path": lock.get('path'),
-                        "owner": lock.get('user', {}).get('username', 'unknown'),
-                        "id": lock.get('id'),
-                        "created_at": lock.get('created_at')
-                    }
+            if doc_rel_path is None:
+                # Return all locks
+                return locks_data
+            else:
+                # Find lock for our specific file
+                for lock in locks_data:
+                    if lock.get('path') == doc_rel_path:
+                        return {
+                            "path": lock.get('path'),
+                            "owner": lock.get('user', {}).get('username', 'unknown'),
+                            "id": lock.get('id'),
+                            "created_at": lock.get('created_at')
+                        }
         else:
             logging.warning(f"GitLab API request failed: {response.status_code} - {response.text}")
             
@@ -3671,8 +3676,27 @@ async def check_lock_status(message):
         if not repo_root:
             return
             
-        # First try git-lfs locks (may show deprecation warning)
-        # Note: We use the command but expect deprecation warnings for GitLab
+        # Try to get lock status using modern GitLab API first
+        repo_type = detect_repository_type(str(repo_root))
+        if repo_type == REPO_TYPES['GITLAB']:
+            # Try GitLab API approach first
+            try:
+                lock_status = get_lock_info_via_gitlab_api(None, repo_root)  # None means get all locks
+                if lock_status:
+                    # Format the output nicely
+                    formatted_output = ""
+                    for lock in lock_status:
+                        path = lock.get('path', 'unknown')
+                        owner = lock.get('user', {}).get('username', 'unknown')
+                        timestamp = lock.get('created_at', '')
+                        formatted_output += f"📄 {path}\n   👤 {owner}\n   🕐 {timestamp}\n\n"
+                    
+                    await message.answer(f"🔒 Активные блокировки:\n\n{formatted_output}", reply_markup=get_locks_keyboard(user_id=message.from_user.id))
+                    return
+            except Exception as e:
+                logging.warning(f"Failed to get locks via GitLab API: {e}")
+        
+        # Fallback to git-lfs locks command (may show deprecation warning)
         proc = subprocess.run(["git", "lfs", "locks"], cwd=str(repo_root), capture_output=True, text=True, encoding='utf-8', errors='replace')
         
         # Log deprecation warning if present
@@ -5294,6 +5318,9 @@ async def continue_gitlab_setup_after_ssh(message, user_id, repo_url, ssh_setup_
         # Use SSH URL for cloning
         ssh_url = convert_https_to_ssh(repo_url)
         
+        # Configure SSH for this operation
+        configure_ssh_for_git_operation(ssh_setup_result['private_key_path'], str(repo_path))
+        
         # Check if user exists, if not - create basic user entry
         user_repo = get_user_repo(user_id)
         
@@ -5304,9 +5331,6 @@ async def continue_gitlab_setup_after_ssh(message, user_id, repo_url, ssh_setup_
             
         # Get repository path
         repo_path = Path(user_repo['repo_path'])
-        
-        # Configure SSH for this operation
-        configure_ssh_for_git_operation(ssh_setup_result['private_key_path'], str(repo_path))
         
         # Remove old repository if exists
         if repo_path.exists():
