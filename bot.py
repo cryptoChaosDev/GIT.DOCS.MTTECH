@@ -4505,6 +4505,13 @@ async def handle_repo_action_simple(msg, action):
         except subprocess.CalledProcessError:
             pass
     
+    # Configure GitLab-specific settings if it's a GitLab repository
+    if repo_url and 'gitlab.' in repo_url:
+        try:
+            configure_gitlab_credentials(str(repo_dir), username, password, user_id)
+        except Exception as e:
+            logging.warning(f"Failed to configure GitLab credentials: {e}")
+    
     try:
         subprocess.run(["git", "config", "--get", "user.email"], cwd=str(repo_dir), check=True, capture_output=True)
     except subprocess.CalledProcessError:
