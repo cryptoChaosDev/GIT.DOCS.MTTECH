@@ -5364,7 +5364,16 @@ async def continue_gitlab_setup_after_ssh(message, user_id, repo_url, ssh_setup_
                 user_repos[key]['repo_url'] = repo_url
                 user_repos[key]['repo_type'] = REPO_TYPES['GITLAB']
                 user_repos[key]['ssh_private_key_path'] = ssh_setup_result.get('private_key_path')
-                user_repos[key]['gitlab_host'] = ssh_setup_result.get('gitlab_host')
+                # Extract host from repo_url instead of ssh_setup_result
+                import re
+                if repo_url.startswith('https://'):
+                    host_match = re.match(r'https://([^/]+)/', repo_url)
+                else:  # SSH format
+                    host_match = re.match(r'git@([^:]+):', repo_url)
+                if host_match:
+                    user_repos[key]['gitlab_host'] = host_match.group(1)
+                else:
+                    user_repos[key]['gitlab_host'] = 'gitlab.com'  # fallback
                 break
         save_user_repos(user_repos)
         
