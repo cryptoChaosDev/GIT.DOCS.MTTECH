@@ -6,6 +6,7 @@ import time
 import subprocess
 import json
 import re
+import requests
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -58,6 +59,791 @@ USER_REPOS_DIR = Path(os.getenv("USER_REPOS_DIR", "user_repos"))
 USER_REPOS_DIR.mkdir(exist_ok=True)
 USER_REPOS_FILE = Path(os.getenv("USER_REPOS_FILE", "/app/data/user_repos.json"))
 LOCKS_FILE = Path(os.getenv("LOCKS_FILE", "/app/data/locks.json"))
+
+# Repository type detection constants
+REPO_TYPES = {
+    'GITHUB': 'github',
+    'GITLAB': 'gitlab',
+    'UNKNOWN': 'unknown'
+}
+
+def detect_repository_type(repo_url: str) -> str:
+    """Detect repository type (GitHub/GitLab) based on URL"""
+    if not repo_url:
+        return REPO_TYPES['UNKNOWN']
+    
+    url_lower = repo_url.lower().strip()
+    
+    # GitHub detection
+    if ('github.com' in url_lower or 
+        url_lower.startswith('git@github.com:') or 
+        url_lower.startswith('https://github.com/')):
+        return REPO_TYPES['GITHUB']
+    
+    # GitLab detection
+    if ('gitlab.com' in url_lower or 
+        url_lower.startswith('git@gitlab.com:') or 
+        url_lower.startswith('https://gitlab.com/')):
+        return REPO_TYPES['GITLAB']
+    
+    # Self-hosted GitLab detection (common patterns)
+    if ('.gitlab.' in url_lower or 
+        'gitlab-' in url_lower or 
+        url_lower.endswith('/gitlab') or
+        # Detect self-hosted GitLab instances by common naming patterns
+        ('gitlab' in url_lower and not 'github' in url_lower)):
+        return REPO_TYPES['GITLAB']
+    
+    return REPO_TYPES['UNKNOWN']
+
+class RepositoryURLValidator:
+    """Validate repository URLs for different VCS platforms"""
+    
+    def __init__(self):
+        self.url_patterns = {
+            REPO_TYPES['GITHUB']: {
+                'https_pattern': r'^https://github\.com/[\w.-]+/[\w.-]+(?:\.git)?/?$',
+                'ssh_pattern': r'^git@github\.com:[\w.-]+/[\w.-]+(?:\.git)?/?$',
+                'allowed_domains': ['github.com'],
+                'min_path_parts': 2  # user/repo
+            },
+            REPO_TYPES['GITLAB']: {
+                'https_pattern': r'^https://(?:[^/]+\.)?gitlab[\w.-]*/[\w.-]+(?:/[\w.-]+)*/[\w.-]+(?:\.git)?/?$',
+                'ssh_pattern': r'^git@(?:[^:]+\.)?gitlab[\w.-]*:[\w.-]+(?:/[\w.-]+)*/[\w.-]+(?:\.git)?/?$',
+                'allowed_domains': ['gitlab.com'],
+                'min_path_parts': 2  # group/project or group/subgroup/project
+            }
+        }
+    
+    def validate_url(self, repo_url: str, repo_type: str = None) -> dict:
+        """Validate repository URL and return validation result"""
+        result = {
+            'valid': False,
+            'errors': [],
+            'warnings': [],
+            'detected_type': None,
+            'normalized_url': None
+        }
+        
+        if not repo_url:
+            result['errors'].append("URL не может быть пустым")
+            return result
+        
+        # Normalize URL
+        normalized_url = repo_url.strip().rstrip('/')
+        result['normalized_url'] = normalized_url
+        
+        # Auto-detect repository type if not provided
+        if not repo_type:
+            repo_type = detect_repository_type(normalized_url)
+            result['detected_type'] = repo_type
+        
+        if repo_type == REPO_TYPES['UNKNOWN']:
+            result['errors'].append("Не удалось определить тип репозитория. Поддерживаются только GitHub и GitLab.")
+            return result
+        
+        # Get validation patterns for the repository type
+        patterns = self.url_patterns.get(repo_type)
+        if not patterns:
+            result['errors'].append(f"Неподдерживаемый тип репозитория: {repo_type}")
+            return result
+        
+        import re
+        
+        # Check HTTPS format
+        if normalized_url.startswith('https://'):
+            if not re.match(patterns['https_pattern'], normalized_url):
+                result['errors'].append("Неверный формат HTTPS URL. Ожидается: https://domain/group/project(.git)")
+            else:
+                result['valid'] = True
+        
+        # Check SSH format
+        elif normalized_url.startswith('git@'):
+            if not re.match(patterns['ssh_pattern'], normalized_url):
+                result['errors'].append("Неверный формат SSH URL. Ожидается: git@domain:group/project(.git)")
+            else:
+                result['valid'] = True
+        
+        # Invalid protocol
+        else:
+            result['errors'].append("Неподдерживаемый протокол. Используйте https:// или git@")
+            
+        # Additional validations
+        if result['valid']:
+            self._perform_additional_validations(normalized_url, repo_type, result)
+        
+        return result
+    
+    def _perform_additional_validations(self, url: str, repo_type: str, result: dict):
+        """Perform additional validation checks"""
+        # Check for common mistakes
+        if '.git.git' in url:
+            result['warnings'].append("Обнаружено дублирование .git в URL")
+        
+        if url.count('//') > 1:
+            result['warnings'].append("Обнаружены множественные слэши в URL")
+        
+        # Check path structure
+        path_parts = self._extract_path_parts(url)
+        if len(path_parts) < 2:
+            result['errors'].append("Недостаточно компонентов пути. Ожидается: группа/проект")
+        
+        # Check for reserved names
+        reserved_names = ['api', 'dashboard', 'groups', 'help', 'users']
+        for part in path_parts:
+            if part.lower() in reserved_names:
+                result['warnings'].append(f"Имя '{part}' может быть зарезервировано платформой")
+    
+    def _extract_path_parts(self, url: str) -> list:
+        """Extract path components from URL"""
+        try:
+            if url.startswith('https://'):
+                # Remove protocol and domain
+                path = url.split('/', 3)[3] if len(url.split('/')) > 3 else ""
+            elif url.startswith('git@'):
+                # Extract path after colon
+                path = url.split(':', 1)[1] if ':' in url else ""
+            else:
+                return []
+            
+            # Remove .git suffix and split by /
+            path = path.replace('.git', '')
+            return [part for part in path.split('/') if part]
+        except Exception:
+            return []
+    
+    def get_url_examples(self, repo_type: str) -> list:
+        """Get URL format examples for repository type"""
+        examples = {
+            REPO_TYPES['GITHUB']: [
+                "https://github.com/username/repository",
+                "https://github.com/username/repository.git",
+                "git@github.com:username/repository.git"
+            ],
+            REPO_TYPES['GITLAB']: [
+                "https://gitlab.com/group/project",
+                "https://gitlab.com/group/subgroup/project.git",
+                "git@gitlab.com:group/project.git",
+                "https://company.gitlab.com/group/project"  # Self-hosted
+            ]
+        }
+        
+        return examples.get(repo_type, [])
+    
+    def normalize_url(self, url: str, repo_type: str) -> str:
+        """Normalize URL to canonical form"""
+        if not url:
+            return url
+        
+        normalized = url.strip().rstrip('/')
+        
+        # Add .git suffix for consistency
+        if repo_type == REPO_TYPES['GITHUB'] and not normalized.endswith('.git'):
+            normalized += '.git'
+        elif repo_type == REPO_TYPES['GITLAB'] and not normalized.endswith('.git'):
+            normalized += '.git'
+        
+        return normalized
+
+def validate_repository_accessibility(repo_url: str, credentials: dict = None) -> dict:
+    """Test if repository is accessible with given credentials"""
+    result = {
+        'accessible': False,
+        'errors': [],
+        'response_time': None
+    }
+    
+    try:
+        import time
+        start_time = time.time()
+        
+        repo_type = detect_repository_type(repo_url)
+        
+        if repo_type == REPO_TYPES['GITHUB']:
+            # Test GitHub repository accessibility
+            if credentials and 'username' in credentials and 'token' in credentials:
+                auth_url = repo_url.replace('https://', f"https://{credentials['username']}:{credentials['token']}@")
+            else:
+                auth_url = repo_url
+                
+            # Simple HEAD request to test accessibility
+            response = requests.head(auth_url.replace('.git', ''), timeout=10)
+            result['response_time'] = time.time() - start_time
+            
+            if response.status_code in [200, 301, 302]:
+                result['accessible'] = True
+            elif response.status_code == 404:
+                result['errors'].append("Репозиторий не найден")
+            elif response.status_code == 403:
+                result['errors'].append("Нет доступа к репозиторию")
+            elif response.status_code == 401:
+                result['errors'].append("Неверные учетные данные")
+            else:
+                result['errors'].append(f"HTTP ошибка: {response.status_code}")
+                
+        elif repo_type == REPO_TYPES['GITLAB']:
+            # Test GitLab repository accessibility
+            if credentials and 'token' in credentials:
+                # Use GitLab API to test access
+                project_path = get_gitlab_project_path(repo_url)
+                api_url = f"https://gitlab.com/api/v4/projects/{requests.utils.quote(project_path, safe='')}"
+                
+                headers = {'PRIVATE-TOKEN': credentials['token']}
+                response = requests.get(api_url, headers=headers, timeout=10)
+                result['response_time'] = time.time() - start_time
+                
+                if response.status_code == 200:
+                    result['accessible'] = True
+                elif response.status_code == 404:
+                    result['errors'].append("Проект не найден в GitLab")
+                elif response.status_code == 401:
+                    result['errors'].append("Неверный GitLab Private Token")
+                elif response.status_code == 403:
+                    result['errors'].append("Нет доступа к проекту GitLab")
+                else:
+                    result['errors'].append(f"GitLab API ошибка: {response.status_code}")
+            else:
+                result['errors'].append("Для GitLab требуется Private Token для проверки доступа")
+        
+    except requests.exceptions.Timeout:
+        result['errors'].append("Таймаут при проверке доступности репозитория")
+    except requests.exceptions.ConnectionError:
+        result['errors'].append("Ошибка подключения к серверу")
+    except Exception as e:
+        result['errors'].append(f"Ошибка при проверке доступности: {str(e)}")
+    
+    return result
+
+def get_gitlab_project_path(repo_url: str) -> str:
+    """Extract GitLab project path from repository URL"""
+    try:
+        if repo_url.startswith('https://'):
+            # Remove https:// and .git suffix
+            path_part = repo_url.replace('https://', '').replace('.git', '')
+            # Split by / and get group/project parts (skip domain)
+            parts = path_part.split('/')
+            if len(parts) >= 3:  # domain/group/project
+                return f"{parts[1]}/{parts[2]}"
+        elif repo_url.startswith('git@'):
+            # git@gitlab.com:group/project.git
+            path_part = repo_url.split(':')[1].replace('.git', '')
+            return path_part
+        
+        return ""
+    except Exception:
+        return ""
+
+def get_vcs_specific_config(repo_type: str) -> dict:
+    """Get VCS-specific configuration settings"""
+    configs = {
+        REPO_TYPES['GITHUB']: {
+            'api_base_url': 'https://api.github.com',
+            'web_base_url': 'https://github.com',
+            'auth_method': 'token',
+            'lfs_server_url': 'https://github.com',
+            'credential_helper': 'store'
+        },
+        REPO_TYPES['GITLAB']: {
+            'api_base_url': 'https://gitlab.com/api/v4',
+            'web_base_url': 'https://gitlab.com',
+            'auth_method': 'private_token',
+            'lfs_server_url': 'https://gitlab.com',
+            'credential_helper': 'store'
+        }
+    }
+    
+    return configs.get(repo_type, configs[REPO_TYPES['GITHUB']])  # Default to GitHub
+
+def get_auth_prompt_message(repo_type: str) -> str:
+    """Get VCS-specific authentication prompt message"""
+    prompts = {
+        REPO_TYPES['GITHUB']: (
+            "🔐 Введите ваш GitHub логин и Personal Access Token (PAT):\n\n"
+            "1. Логин GitHub (username)\n"
+            "2. Personal Access Token (с доступом к repo)\n\n"
+            "💡 Как создать PAT: Settings → Developer settings → Personal access tokens"
+        ),
+        REPO_TYPES['GITLAB']: (
+            "🔐 Для GitLab требуется SSH-ключ:\n\n"
+            "1. Бот сгенерирует SSH-ключ для вас\n"
+            "2. Вы получите публичный ключ\n"
+            "3. Добавьте его в ваш GitLab: Profile → SSH Keys\n"
+            "4. Введите ваш GitLab username\n\n"
+            "Нажмите любую кнопку для продолжения..."
+        )
+    }
+    
+    return prompts.get(repo_type, prompts[REPO_TYPES['GITHUB']])
+
+def validate_gitlab_token(token: str) -> bool:
+    """Validate GitLab token format (basic validation)"""
+    if not token:
+        return False
+    
+    # GitLab tokens are typically 20+ characters
+    if len(token) < 20:
+        return False
+    
+    # Basic format validation (should contain only alphanumeric and -_)
+    import re
+    if not re.match(r'^[a-zA-Z0-9_-]+$', token):
+        return False
+    
+    return True
+
+class SSHKeyManager:
+    """Manage SSH key generation and storage for users"""
+    
+    def __init__(self):
+        self.ssh_dir = Path("/app/data/ssh_keys")
+        self.ssh_dir.mkdir(exist_ok=True)
+    
+    def generate_ssh_key_pair(self, user_id: int, email: str = None) -> dict:
+        """Generate SSH key pair for user"""
+        try:
+            if not email:
+                email = f"bot-user-{user_id}@git-docs.local"
+            
+            # Create user-specific directory
+            user_key_dir = self.ssh_dir / str(user_id)
+            user_key_dir.mkdir(exist_ok=True)
+            
+            private_key_path = user_key_dir / "id_ed25519"
+            public_key_path = user_key_dir / "id_ed25519.pub"
+            
+            # Check if keys already exist
+            if private_key_path.exists() and public_key_path.exists():
+                # Load existing keys
+                private_key = private_key_path.read_text().strip()
+                public_key = public_key_path.read_text().strip()
+                return {
+                    'private_key': private_key,
+                    'public_key': public_key,
+                    'private_key_path': str(private_key_path),
+                    'public_key_path': str(public_key_path)
+                }
+            
+            # Generate new key pair
+            import subprocess
+            
+            # Generate Ed25519 key (more secure than RSA)
+            cmd = [
+                "ssh-keygen",
+                "-t", "ed25519",
+                "-f", str(private_key_path),
+                "-N", "",  # No passphrase
+                "-C", email
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            
+            # Read generated keys
+            private_key = private_key_path.read_text().strip()
+            public_key = public_key_path.read_text().strip()
+            
+            # Set proper permissions
+            private_key_path.chmod(0o600)
+            public_key_path.chmod(0o644)
+            
+            logging.info(f"Generated SSH key pair for user {user_id}")
+            
+            return {
+                'private_key': private_key,
+                'public_key': public_key,
+                'private_key_path': str(private_key_path),
+                'public_key_path': str(public_key_path)
+            }
+            
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Failed to generate SSH key for user {user_id}: {e.stderr}")
+            return {}
+        except Exception as e:
+            logging.error(f"Error generating SSH key for user {user_id}: {e}")
+            return {}
+    
+    def get_user_ssh_key(self, user_id: int) -> dict:
+        """Get existing SSH key for user"""
+        user_key_dir = self.ssh_dir / str(user_id)
+        private_key_path = user_key_dir / "id_ed25519"
+        public_key_path = user_key_dir / "id_ed25519.pub"
+        
+        if private_key_path.exists() and public_key_path.exists():
+            return {
+                'private_key': private_key_path.read_text().strip(),
+                'public_key': public_key_path.read_text().strip(),
+                'private_key_path': str(private_key_path),
+                'public_key_path': str(public_key_path)
+            }
+        
+        return {}
+    
+    def delete_user_ssh_keys(self, user_id: int) -> bool:
+        """Delete SSH keys for user"""
+        try:
+            user_key_dir = self.ssh_dir / str(user_id)
+            if user_key_dir.exists():
+                import shutil
+                shutil.rmtree(user_key_dir)
+                logging.info(f"Deleted SSH keys for user {user_id}")
+            return True
+        except Exception as e:
+            logging.error(f"Failed to delete SSH keys for user {user_id}: {e}")
+            return False
+    
+    def format_public_key_for_gitlab(self, public_key: str, user_id: int) -> str:
+        """Format public key for GitLab deployment key"""
+        # Add descriptive comment
+        key_parts = public_key.strip().split()
+        if len(key_parts) >= 2:
+            key_type, key_data = key_parts[0], key_parts[1]
+            comment = f"git-docs-bot-user-{user_id}-key"
+            return f"{key_type} {key_data} {comment}"
+        return public_key
+
+def setup_gitlab_ssh_access(user_id: int, repo_url: str) -> dict:
+    """Setup SSH access for GitLab repository"""
+    try:
+        ssh_manager = SSHKeyManager()
+        
+        # Generate SSH key pair
+        ssh_keys = ssh_manager.generate_ssh_key_pair(user_id)
+        if not ssh_keys:
+            return {'success': False, 'error': 'Failed to generate SSH keys'}
+        
+        # Format public key for GitLab
+        formatted_public_key = ssh_manager.format_public_key_for_gitlab(
+            ssh_keys['public_key'], user_id
+        )
+        
+        # Extract GitLab instance URL
+        from urllib.parse import urlparse
+        parsed_url = urlparse(repo_url)
+        gitlab_host = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        
+        result = {
+            'success': True,
+            'public_key': formatted_public_key,
+            'private_key_path': ssh_keys['private_key_path'],
+            'gitlab_host': gitlab_host,
+            'instructions': f"""🔐 SSH Setup Instructions:
+
+1. Copy the public key below
+2. Go to your GitLab instance: {gitlab_host}
+3. Navigate to: Profile → SSH Keys
+4. Paste the public key and save it
+5. The bot will use the private key for Git operations
+
+Public Key:
+```
+{formatted_public_key}
+```"""
+        }
+        
+        return result
+        
+    except Exception as e:
+        logging.error(f"Failed to setup GitLab SSH access for user {user_id}: {e}")
+        return {'success': False, 'error': str(e)}
+
+def convert_https_to_ssh(https_url: str) -> str:
+    """Convert HTTPS GitLab URL to SSH format"""
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(https_url)
+        
+        # Remove /-/tree/master part if present
+        path = parsed.path
+        if '/-/' in path:
+            path = path.split('/-/')[0]
+        
+        # Remove leading slash and .git suffix
+        path = path.lstrip('/').rstrip('/')
+        if path.endswith('.git'):
+            path = path[:-4]
+        
+        # Construct SSH URL
+        ssh_url = f"git@{parsed.hostname}:{path}.git"
+        return ssh_url
+        
+    except Exception as e:
+        logging.error(f"Failed to convert HTTPS to SSH URL: {e}")
+        return https_url
+
+def configure_ssh_for_git_operation(private_key_path: str):
+    """Configure SSH key for Git operation"""
+    try:
+        import os
+        # Set GIT_SSH_COMMAND to use specific private key
+        os.environ['GIT_SSH_COMMAND'] = f"ssh -i {private_key_path} -o StrictHostKeyChecking=no"
+        logging.info(f"Configured SSH key: {private_key_path}")
+    except Exception as e:
+        logging.error(f"Failed to configure SSH for Git: {e}")
+
+def configure_gitlab_credentials(repo_path: str, gitlab_username: str, private_token: str, user_id: int = None):
+    """Configure Git credentials specifically for GitLab"""
+    try:
+        # Set GitLab-specific user configuration
+        subprocess.run(["git", "config", "user.name", gitlab_username], cwd=repo_path, check=True, capture_output=True)
+        email = f"{gitlab_username}@users.noreply.gitlab.com"
+        subprocess.run(["git", "config", "user.email", email], cwd=repo_path, check=True, capture_output=True)
+        
+        # Configure GitLab LFS
+        subprocess.run(["git", "config", "lfs.url", "https://gitlab.com"], cwd=repo_path, check=True, capture_output=True)
+        
+        # Create personal credential file for GitLab
+        if user_id:
+            cred_filename = f".git-credentials-gitlab-{user_id}"
+        else:
+            cred_filename = ".git-credentials-gitlab-default"
+            
+        cred_file = Path("/app/data") / cred_filename
+        # GitLab credential format: https://oauth2:TOKEN@gitlab.com
+        cred_content = f"https://oauth2:{private_token}@gitlab.com\n"
+        cred_file.write_text(cred_content)
+        cred_file.chmod(0o600)
+        
+        # Configure Git to use personal credential file for this repository
+        subprocess.run(["git", "config", "credential.helper", f"store --file={cred_file}"], 
+                      cwd=repo_path, check=True, capture_output=True)
+        
+        logging.info(f"GitLab credentials configured for user {user_id} ({gitlab_username})")
+        return True
+        
+    except Exception as e:
+        logging.error(f"Failed to configure GitLab credentials: {e}")
+        return False
+
+class GitLabAuthManager:
+    """Manage GitLab authentication and token validation"""
+    
+    def __init__(self):
+        self.token_cache = {}
+    
+    def validate_and_store_token(self, user_id: int, token: str, project_path: str = None) -> bool:
+        """Validate GitLab token and store it securely"""
+        if not validate_gitlab_token(token):
+            logging.warning(f"Invalid GitLab token format for user {user_id}")
+            return False
+        
+        # Test token validity using GitLab API
+        client = GitLabAPIClient(private_token=token)
+        try:
+            # Simple API call to verify token
+            response = client.session.get(f"{client.api_url}/version", timeout=10)
+            if response.status_code == 200:
+                # Store valid token
+                self.token_cache[user_id] = {
+                    'token': token,
+                    'validated_at': datetime.now().isoformat(),
+                    'project_path': project_path
+                }
+                logging.info(f"GitLab token validated and stored for user {user_id}")
+                return True
+            else:
+                logging.warning(f"GitLab token validation failed: {response.status_code}")
+                return False
+        except Exception as e:
+            logging.error(f"GitLab token validation error: {e}")
+            return False
+    
+    def get_user_token(self, user_id: int) -> str:
+        """Retrieve stored GitLab token for user"""
+        user_data = self.token_cache.get(user_id, {})
+        return user_data.get('token', '')
+    
+    def is_token_valid(self, user_id: int) -> bool:
+        """Check if stored token is still valid (basic check)"""
+        user_data = self.token_cache.get(user_id, {})
+        if not user_data.get('token'):
+            return False
+        
+        # Check if token was validated recently (within 24 hours)
+        validated_at = user_data.get('validated_at')
+        if validated_at:
+            validated_time = datetime.fromisoformat(validated_at)
+            if datetime.now() - validated_time < timedelta(hours=24):
+                return True
+        
+        return False
+    
+    def invalidate_token(self, user_id: int):
+        """Remove invalidated token from cache"""
+        if user_id in self.token_cache:
+            del self.token_cache[user_id]
+            logging.info(f"Invalidated GitLab token for user {user_id}")
+
+
+class GitLabAPIClient:
+    """GitLab API client for repository operations"""
+    
+    def __init__(self, private_token: str = None, api_url: str = None):
+        self.private_token = private_token
+        self.api_url = api_url or "https://gitlab.com/api/v4"
+        self.session = requests.Session() if 'requests' in globals() else None
+        
+        if self.session and self.private_token:
+            self.session.headers.update({
+                'PRIVATE-TOKEN': self.private_token,
+                'Content-Type': 'application/json'
+            })
+    
+    def get_project_info(self, project_id_or_path: str) -> dict:
+        """Get project information from GitLab"""
+        try:
+            if not self.session:
+                logging.warning("Requests library not available for GitLab API")
+                return {}
+            
+            # Handle both project ID and path formats
+            if '/' in project_id_or_path:
+                # URL-encoded project path
+                encoded_path = requests.utils.quote(project_id_or_path, safe='')
+                url = f"{self.api_url}/projects/{encoded_path}"
+            else:
+                # Numeric project ID
+                url = f"{self.api_url}/projects/{project_id_or_path}"
+            
+            response = self.session.get(url, timeout=30)
+            response.raise_for_status()
+            return response.json()
+            
+        except Exception as e:
+            logging.error(f"Failed to get GitLab project info: {e}")
+            return {}
+    
+    def get_project_files(self, project_id: str, path: str = "", ref: str = "main") -> list:
+        """List files in a GitLab project directory"""
+        try:
+            if not self.session:
+                return []
+            
+            encoded_path = requests.utils.quote(path, safe='')
+            url = f"{self.api_url}/projects/{project_id}/repository/tree"
+            params = {
+                'path': encoded_path,
+                'ref': ref,
+                'recursive': False
+            }
+            
+            response = self.session.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            return response.json()
+            
+        except Exception as e:
+            logging.error(f"Failed to get GitLab project files: {e}")
+            return []
+    
+    def get_file_content(self, project_id: str, file_path: str, ref: str = "main") -> str:
+        """Get file content from GitLab repository"""
+        try:
+            if not self.session:
+                return ""
+            
+            encoded_path = requests.utils.quote(file_path, safe='')
+            url = f"{self.api_url}/projects/{project_id}/repository/files/{encoded_path}/raw"
+            params = {'ref': ref}
+            
+            response = self.session.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            return response.text
+            
+        except Exception as e:
+            logging.error(f"Failed to get GitLab file content: {e}")
+            return ""
+    
+    def create_branch(self, project_id: str, branch_name: str, ref: str = "main") -> dict:
+        """Create a new branch in GitLab project"""
+        try:
+            if not self.session:
+                return {}
+            
+            url = f"{self.api_url}/projects/{project_id}/repository/branches"
+            data = {
+                'branch': branch_name,
+                'ref': ref
+            }
+            
+            response = self.session.post(url, json=data, timeout=30)
+            response.raise_for_status()
+            return response.json()
+            
+        except Exception as e:
+            logging.error(f"Failed to create GitLab branch: {e}")
+            return {}
+    
+    def create_commit(self, project_id: str, branch: str, commit_message: str, 
+                     actions: list, author_email: str = None, author_name: str = None) -> dict:
+        """Create a commit in GitLab project"""
+        try:
+            if not self.session:
+                return {}
+            
+            url = f"{self.api_url}/projects/{project_id}/repository/commits"
+            data = {
+                'branch': branch,
+                'commit_message': commit_message,
+                'actions': actions
+            }
+            
+            if author_email:
+                data['author_email'] = author_email
+            if author_name:
+                data['author_name'] = author_name
+            
+            response = self.session.post(url, json=data, timeout=30)
+            response.raise_for_status()
+            return response.json()
+            
+        except Exception as e:
+            logging.error(f"Failed to create GitLab commit: {e}")
+            return {}
+    
+    def get_lfs_locks(self, project_id: str) -> list:
+        """Get LFS locks for a GitLab project"""
+        try:
+            if not self.session:
+                return []
+            
+            url = f"{self.api_url}/projects/{project_id}/lfs/locks"
+            response = self.session.get(url, timeout=30)
+            response.raise_for_status()
+            return response.json()
+            
+        except Exception as e:
+            logging.error(f"Failed to get GitLab LFS locks: {e}")
+            return []
+    
+    def create_lfs_lock(self, project_id: str, path: str) -> dict:
+        """Create LFS lock for a file in GitLab project"""
+        try:
+            if not self.session:
+                return {}
+            
+            url = f"{self.api_url}/projects/{project_id}/lfs/locks"
+            data = {'path': path}
+            
+            response = self.session.post(url, json=data, timeout=30)
+            response.raise_for_status()
+            return response.json()
+            
+        except Exception as e:
+            logging.error(f"Failed to create GitLab LFS lock: {e}")
+            return {}
+    
+    def delete_lfs_lock(self, project_id: str, lock_id: str) -> bool:
+        """Delete LFS lock in GitLab project"""
+        try:
+            if not self.session:
+                return False
+            
+            url = f"{self.api_url}/projects/{project_id}/lfs/locks/{lock_id}/unlock"
+            response = self.session.delete(url, timeout=30)
+            response.raise_for_status()
+            return True
+            
+        except Exception as e:
+            logging.error(f"Failed to delete GitLab LFS lock: {e}")
+            return False
 
 # SECURITY: validate_path_safety function was removed as it was not used
 
@@ -211,7 +997,8 @@ def save_user_repos(m: dict):
         logging.exception("Failed to save user repos file")
 
 
-def set_user_repo(user_id: int, repo_path: str, repo_url: str = None, username: str = None, telegram_username: str = None):
+def set_user_repo(user_id: int, repo_path: str, repo_url: str = None, username: str = None, 
+                  telegram_username: str = None, repo_type: str = None, auth_token: str = None):
     """Store user repository mapping using composite key: telegram_id:git_username"""
     m = load_user_repos()
     
@@ -222,13 +1009,20 @@ def set_user_repo(user_id: int, repo_path: str, repo_url: str = None, username: 
         # Fallback to just user_id if no username provided
         composite_key = str(user_id)
     
+    # Detect repository type if not provided
+    if not repo_type and repo_url:
+        repo_type = detect_repository_type(repo_url)
+    
     m[composite_key] = {
         'telegram_id': user_id,
         'telegram_username': telegram_username,
         'git_username': username,
         'repo_path': str(repo_path),
         'repo_url': repo_url,
-        'created_at': datetime.now().isoformat()
+        'repo_type': repo_type or REPO_TYPES['UNKNOWN'],
+        'auth_token': auth_token,  # Store encrypted token reference
+        'created_at': datetime.now().isoformat(),
+        'last_updated': datetime.now().isoformat()
     }
     save_user_repos(m)
 
@@ -253,6 +1047,224 @@ def get_user_repo(user_id: int, git_username: str = None):
     
     return None
 
+class VCSConfigurationManager:
+    """Manage VCS-specific configurations and settings"""
+    
+    def __init__(self):
+        self.config_cache = {}
+    
+    def get_user_vcs_config(self, user_id: int, git_username: str = None) -> dict:
+        """Get VCS-specific configuration for user"""
+        user_repo = get_user_repo(user_id, git_username)
+        if not user_repo:
+            return {}
+        
+        repo_type = user_repo.get('repo_type', REPO_TYPES['UNKNOWN'])
+        repo_url = user_repo.get('repo_url', '')
+        
+        # Get base VCS configuration
+        base_config = get_vcs_specific_config(repo_type)
+        
+        # Add user-specific settings
+        user_config = {
+            'repo_type': repo_type,
+            'repo_url': repo_url,
+            'repo_path': user_repo.get('repo_path', ''),
+            'git_username': user_repo.get('git_username', ''),
+            'base_config': base_config,
+            'credentials_configured': self._check_credentials_configured(user_id, repo_type)
+        }
+        
+        return user_config
+    
+    def _check_credentials_configured(self, user_id: int, repo_type: str) -> bool:
+        """Check if credentials are configured for user and VCS type"""
+        try:
+            # Check for credential files
+            data_dir = Path("/app/data")
+            cred_patterns = []
+            
+            if repo_type == REPO_TYPES['GITHUB']:
+                cred_patterns = [f".git-credentials-{user_id}", f".git-credentials-github-{user_id}"]
+            elif repo_type == REPO_TYPES['GITLAB']:
+                cred_patterns = [f".git-credentials-gitlab-{user_id}", f".git-credentials-lfs-{user_id}"]
+            
+            for pattern in cred_patterns:
+                cred_file = data_dir / pattern
+                if cred_file.exists():
+                    return True
+            
+            return False
+        except Exception:
+            return False
+    
+    def update_user_repo_config(self, user_id: int, updates: dict, git_username: str = None) -> bool:
+        """Update user repository configuration"""
+        try:
+            user_repos = load_user_repos()
+            
+            # Find the correct entry
+            target_key = None
+            if git_username:
+                target_key = f"{user_id}:{git_username}"
+            else:
+                # Find any entry for this user
+                for key, repo_info in user_repos.items():
+                    if str(repo_info.get('telegram_id')) == str(user_id):
+                        target_key = key
+                        break
+            
+            if not target_key or target_key not in user_repos:
+                logging.warning(f"No repository found for user {user_id}")
+                return False
+            
+            # Update the entry
+            user_repos[target_key].update(updates)
+            user_repos[target_key]['last_updated'] = datetime.now().isoformat()
+            
+            save_user_repos(user_repos)
+            logging.info(f"Updated repository config for user {user_id}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Failed to update user repo config: {e}")
+            return False
+    
+    def get_repository_status(self, user_id: int, git_username: str = None) -> dict:
+        """Get comprehensive repository status for user"""
+        user_repo = get_user_repo(user_id, git_username)
+        if not user_repo:
+            return {'status': 'not_configured', 'details': 'Repository not set up'}
+        
+        repo_path = Path(user_repo.get('repo_path', ''))
+        repo_url = user_repo.get('repo_url', '')
+        repo_type = user_repo.get('repo_type', REPO_TYPES['UNKNOWN'])
+        
+        status_info = {
+            'repo_type': repo_type,
+            'repo_url': repo_url,
+            'repo_path': str(repo_path),
+            'git_username': user_repo.get('git_username', ''),
+            'created_at': user_repo.get('created_at', ''),
+            'last_updated': user_repo.get('last_updated', '')
+        }
+        
+        # Check repository existence
+        if not repo_path.exists():
+            status_info['status'] = 'path_missing'
+            status_info['details'] = 'Repository directory does not exist'
+            return status_info
+        
+        # Check if it's a git repository
+        git_dir = repo_path / ".git"
+        if not git_dir.exists():
+            status_info['status'] = 'not_git_repo'
+            status_info['details'] = 'Directory exists but is not a git repository'
+            return status_info
+        
+        # Check remote connectivity
+        try:
+            result = subprocess.run(["git", "-C", str(repo_path), "remote", "show", "origin"], 
+                                  capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                status_info['status'] = 'connected'
+                status_info['details'] = 'Repository connected and accessible'
+            else:
+                status_info['status'] = 'connection_error'
+                status_info['details'] = 'Cannot connect to remote repository'
+        except subprocess.TimeoutExpired:
+            status_info['status'] = 'timeout'
+            status_info['details'] = 'Connection timeout when checking repository'
+        except Exception as e:
+            status_info['status'] = 'error'
+            status_info['details'] = f'Error checking repository: {str(e)}'
+        
+        return status_info
+    
+    def reset_user_repository(self, user_id: int, git_username: str = None) -> bool:
+        """Reset user repository configuration and clean up files"""
+        try:
+            user_repo = get_user_repo(user_id, git_username)
+            if not user_repo:
+                return False
+            
+            repo_path = Path(user_repo.get('repo_path', ''))
+            
+            # Remove repository directory
+            if repo_path.exists() and repo_path.is_dir():
+                import shutil
+                shutil.rmtree(repo_path)
+                logging.info(f"Removed repository directory: {repo_path}")
+            
+            # Remove credential files
+            self._cleanup_user_credentials(user_id, user_repo.get('repo_type', ''))
+            
+            # Remove from user repos
+            user_repos = load_user_repos()
+            target_key = f"{user_id}:{user_repo.get('git_username', '')}"
+            if target_key in user_repos:
+                del user_repos[target_key]
+                save_user_repos(user_repos)
+                logging.info(f"Removed user repository entry for {user_id}")
+            
+            return True
+            
+        except Exception as e:
+            logging.error(f"Failed to reset user repository: {e}")
+            return False
+    
+    def _cleanup_user_credentials(self, user_id: int, repo_type: str):
+        """Clean up credential files for user"""
+        try:
+            data_dir = Path("/app/data")
+            patterns = []
+            
+            if repo_type == REPO_TYPES['GITHUB']:
+                patterns = [f".git-credentials-{user_id}*", f".git-credentials-github-{user_id}*"]
+            elif repo_type == REPO_TYPES['GITLAB']:
+                patterns = [f".git-credentials-gitlab-{user_id}*", f".git-credentials-lfs-{user_id}*"]
+            
+            for pattern in patterns:
+                for cred_file in data_dir.glob(pattern):
+                    if cred_file.exists():
+                        cred_file.unlink()
+                        logging.info(f"Removed credential file: {cred_file}")
+                        
+        except Exception as e:
+            logging.error(f"Failed to cleanup credentials: {e}")
+
+def migrate_user_repos_format() -> bool:
+    """Migrate existing user_repos to new format with VCS support"""
+    try:
+        user_repos = load_user_repos()
+        migrated = False
+        
+        for key, repo_info in user_repos.items():
+            # Add missing fields
+            if 'repo_type' not in repo_info:
+                repo_url = repo_info.get('repo_url', '')
+                repo_info['repo_type'] = detect_repository_type(repo_url)
+                migrated = True
+            
+            if 'last_updated' not in repo_info:
+                repo_info['last_updated'] = repo_info.get('created_at', datetime.now().isoformat())
+                migrated = True
+            
+            if 'auth_token' not in repo_info:
+                repo_info['auth_token'] = None
+                migrated = True
+        
+        if migrated:
+            save_user_repos(user_repos)
+            logging.info("User repos format migrated successfully")
+            return True
+        
+        return False
+        
+    except Exception as e:
+        logging.error(f"Failed to migrate user repos format: {e}")
+        return False
+
 
 def create_basic_user_entry(user_id: int, telegram_username: str = None):
     """Create basic user entry for new user"""
@@ -269,7 +1281,10 @@ def create_basic_user_entry(user_id: int, telegram_username: str = None):
             'git_username': None,  # Will be set by user later
             'repo_path': repo_path,
             'repo_url': None,  # Will be set by user
-            'created_at': datetime.now().isoformat()
+            'repo_type': REPO_TYPES['UNKNOWN'],  # Will be detected from URL
+            'auth_token': None,  # Will be set during authentication
+            'created_at': datetime.now().isoformat(),
+            'last_updated': datetime.now().isoformat()
         }
         
         save_user_repos(user_repos)
@@ -534,10 +1549,10 @@ def _clear_action(user_id):
         user_doc_sessions.pop(user_id, None)
 
 
-def get_lfs_lock_info(doc_rel_path: str, cwd: Path = REPO_PATH):
+def get_lfs_lock_info(doc_rel_path: str, cwd: Path = REPO_PATH, repo_type: str = None):
     """Return lock info for a path according to `git lfs locks` output or None. cwd specifies repository root."""
     try:
-        # Simple call - credentials are stored globally
+        # Simple call - credentials are stored per repository
         proc = subprocess.run(["git", "lfs", "locks"], cwd=str(cwd), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
         out = proc.stdout or ""
         # Parse Git LFS locks output format: "path    owner    timestamp"
@@ -560,6 +1575,164 @@ def get_lfs_lock_info(doc_rel_path: str, cwd: Path = REPO_PATH):
     except subprocess.CalledProcessError:
         return None
     return None
+
+class GitLabLFSManager:
+    """Manage Git LFS operations for GitLab repositories"""
+    
+    def __init__(self, api_client: GitLabAPIClient = None):
+        self.api_client = api_client
+    
+    def get_project_id_from_url(self, repo_url: str) -> str:
+        """Extract project ID or path from repository URL"""
+        try:
+            # Handle HTTPS URLs
+            if repo_url.startswith('https://'):
+                # Remove https:// and .git suffix
+                path_part = repo_url.replace('https://', '').replace('.git', '')
+                # Split by / and get group/project parts
+                parts = path_part.split('/')
+                if len(parts) >= 3:  # gitlab.com/group/project
+                    return f"{parts[1]}/{parts[2]}"
+            
+            # Handle SSH URLs
+            elif repo_url.startswith('git@'):
+                # git@gitlab.com:group/project.git
+                path_part = repo_url.split(':')[1].replace('.git', '')
+                return path_part
+            
+            return ""
+        except Exception as e:
+            logging.error(f"Failed to extract project ID from URL {repo_url}: {e}")
+            return ""
+    
+    def get_lfs_locks_via_api(self, repo_url: str) -> list:
+        """Get LFS locks using GitLab API"""
+        if not self.api_client:
+            return []
+        
+        try:
+            project_id = self.get_project_id_from_url(repo_url)
+            if not project_id:
+                return []
+            
+            return self.api_client.get_lfs_locks(project_id)
+        except Exception as e:
+            logging.error(f"Failed to get LFS locks via API: {e}")
+            return []
+    
+    def create_lfs_lock_via_api(self, repo_url: str, file_path: str) -> dict:
+        """Create LFS lock using GitLab API"""
+        if not self.api_client:
+            return {}
+        
+        try:
+            project_id = self.get_project_id_from_url(repo_url)
+            if not project_id:
+                return {}
+            
+            return self.api_client.create_lfs_lock(project_id, file_path)
+        except Exception as e:
+            logging.error(f"Failed to create LFS lock via API: {e}")
+            return {}
+    
+    def delete_lfs_lock_via_api(self, repo_url: str, lock_id: str) -> bool:
+        """Delete LFS lock using GitLab API"""
+        if not self.api_client:
+            return False
+        
+        try:
+            project_id = self.get_project_id_from_url(repo_url)
+            if not project_id:
+                return False
+            
+            return self.api_client.delete_lfs_lock(project_id, lock_id)
+        except Exception as e:
+            logging.error(f"Failed to delete LFS lock via API: {e}")
+            return False
+    
+    def configure_gitlab_lfs(self, repo_path: str, repo_url: str) -> bool:
+        """Configure Git LFS specifically for GitLab repository"""
+        try:
+            # Initialize Git LFS
+            subprocess.run(["git", "lfs", "install"], cwd=str(repo_path), check=True, capture_output=True)
+            
+            # Configure LFS URL for GitLab
+            subprocess.run(["git", "config", "lfs.url", "https://gitlab.com"], cwd=str(repo_path), check=True, capture_output=True)
+            
+            # Configure LFS push URL
+            lfs_push_url = repo_url.replace("https://", "https://oauth2:${GITLAB_TOKEN}@")
+            subprocess.run(["git", "config", "lfs.pushurl", lfs_push_url], cwd=str(repo_path), check=True, capture_output=True)
+            
+            logging.info(f"GitLab LFS configured for repository: {repo_path}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Failed to configure GitLab LFS: {e}")
+            return False
+    
+    def sync_lfs_objects(self, repo_path: str) -> bool:
+        """Sync LFS objects with GitLab"""
+        try:
+            # Fetch LFS objects
+            subprocess.run(["git", "lfs", "fetch", "--all"], cwd=str(repo_path), check=True, capture_output=True)
+            
+            # Push LFS objects
+            subprocess.run(["git", "lfs", "push", "origin", "HEAD"], cwd=str(repo_path), check=True, capture_output=True)
+            
+            logging.info(f"LFS objects synced for repository: {repo_path}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Failed to sync LFS objects: {e}")
+            return False
+
+def get_gitlab_project_info(repo_url: str, private_token: str) -> dict:
+    """Get GitLab project information using repository URL"""
+    try:
+        # Extract project path from URL
+        if 'gitlab.com' in repo_url:
+            # Remove protocol and .git suffix
+            clean_url = repo_url.replace('https://', '').replace('git@', '').replace('.git', '')
+            if clean_url.startswith('gitlab.com:'):
+                clean_url = clean_url.replace('gitlab.com:', '')
+            elif clean_url.startswith('gitlab.com/'):
+                clean_url = clean_url.replace('gitlab.com/', '')
+            
+            project_path = clean_url
+            
+            # Create API client and get project info
+            client = GitLabAPIClient(private_token=private_token)
+            return client.get_project_info(project_path)
+        
+        return {}
+    except Exception as e:
+        logging.error(f"Failed to get GitLab project info: {e}")
+        return {}
+
+def initialize_gitlab_lfs(repo_path: str, repo_url: str, private_token: str) -> bool:
+    """Initialize and configure Git LFS for GitLab repository"""
+    try:
+        # Initialize Git LFS
+        subprocess.run(["git", "lfs", "install"], cwd=str(repo_path), check=True, capture_output=True)
+        
+        # Configure GitLab LFS settings
+        subprocess.run(["git", "config", "lfs.url", "https://gitlab.com"], cwd=str(repo_path), check=True, capture_output=True)
+        
+        # Set up credentials for LFS operations
+        cred_content = f"https://oauth2:{private_token}@gitlab.com\n"
+        cred_file = Path("/app/data") / f".git-credentials-lfs-{os.path.basename(repo_path)}"
+        cred_file.write_text(cred_content)
+        cred_file.chmod(0o600)
+        
+        subprocess.run(["git", "config", "credential.helper", f"store --file={cred_file}"], 
+                      cwd=str(repo_path), check=True, capture_output=True)
+        
+        logging.info(f"GitLab LFS initialized for {repo_path}")
+        return True
+        
+    except Exception as e:
+        logging.error(f"Failed to initialize GitLab LFS: {e}")
+        return False
 
 # Initialize stub bot since we're using python-telegram-bot as the main library
 AIORGRAM_AVAILABLE = False
@@ -868,9 +2041,50 @@ async def setup_repo(message, state=None):
 
 async def process_repo_url(message, state=None):
     repo_url = message.text.strip()
-    await state.update_data(repo_url=repo_url)
+    
+    # Validate repository URL
+    validator = RepositoryURLValidator()
+    validation_result = validator.validate_url(repo_url)
+    
+    if not validation_result['valid']:
+        error_msg = "❌ Неверный формат URL репозитория:\n\n"
+        for error in validation_result['errors']:
+            error_msg += f"• {error}\n"
+        
+        if validation_result['warnings']:
+            error_msg += "\n⚠️ Предупреждения:\n"
+            for warning in validation_result['warnings']:
+                error_msg += f"• {warning}\n"
+        
+        # Provide examples
+        detected_type = validation_result.get('detected_type', REPO_TYPES['UNKNOWN'])
+        if detected_type != REPO_TYPES['UNKNOWN']:
+            examples = validator.get_url_examples(detected_type)
+            if examples:
+                error_msg += "\n✅ Примеры правильных URL:\n"
+                for example in examples[:3]:  # Show first 3 examples
+                    error_msg += f"• {example}\n"
+        
+        await message.answer(error_msg)
+        return
+    
+    # URL is valid, proceed with setup
+    normalized_url = validation_result['normalized_url']
+    repo_type = validation_result.get('detected_type', REPO_TYPES['UNKNOWN'])
+    
+    # Store validated data
+    await state.update_data(repo_url=normalized_url)
+    await state.update_data(repo_type=repo_type)
+    
+    # Show appropriate auth prompt
+    auth_prompt = get_auth_prompt_message(repo_type)
+    
+    # Add validation confirmation
+    confirmation_msg = f"✅ URL проверен и нормализован:\n{normalized_url}\n\n"
+    confirmation_msg += auth_prompt
+    
     await state.set_state(UserConfigStates.waiting_for_username)
-    await message.answer("Введите ваше имя пользователя GitHub:")
+    await message.answer(confirmation_msg)
 
 async def process_username(message, state=None):
     username = message.text.strip()
@@ -889,13 +2103,63 @@ async def process_password(message, state=None):
     try:
         repo_url = user_data['repo_url']
         username = user_data['username']
+        repo_type = user_data.get('repo_type', REPO_TYPES['GITHUB'])
+        
+        # Handle GitLab SSH authentication
+        if repo_type == REPO_TYPES['GITLAB']:
+            # Setup SSH access for GitLab
+            ssh_setup_result = setup_gitlab_ssh_access(message.from_user.id, repo_url)
+            if not ssh_setup_result['success']:
+                await message.answer(f"❌ Ошибка настройки SSH для GitLab: {ssh_setup_result['error']}")
+                await state.set_state(UserConfigStates.waiting_for_password)
+                return
+            
+            # Send SSH setup instructions to user
+            await message.answer(ssh_setup_result['instructions'])
+            
+            # Store SSH key info
+            await state.update_data(
+                ssh_private_key_path=ssh_setup_result['private_key_path'],
+                gitlab_host=ssh_setup_result['gitlab_host']
+            )
+            
+            # Continue with repository setup using SSH
+            password = None  # No token needed for SSH
+        
+        # Validate GitLab token if needed (for non-SSH cases)
+        elif repo_type == REPO_TYPES['GITLAB']:
+            if not validate_gitlab_token(password):
+                await message.answer("❌ Неверный формат GitLab Private Token. Токен должен содержать минимум 20 символов и состоять из букв, цифр, дефисов и подчеркиваний.")
+                await state.set_state(UserConfigStates.waiting_for_password)
+                return
+            
+            # Test GitLab token
+            auth_manager = GitLabAuthManager()
+            if not auth_manager.validate_and_store_token(message.from_user.id, password):
+                await message.answer("❌ Неверный или истекший GitLab Private Token. Проверьте токен и попробуйте снова.")
+                await state.set_state(UserConfigStates.waiting_for_password)
+                return
         
         # Check if the repo already exists
         git_dir = REPO_PATH / ".git"
         if git_dir.exists():
-            # If it's already a git repo, set the remote URL with credentials for this session
-            repo_url_with_creds = "https://" + username + ":" + password + "@" + repo_url.replace("https://", "")
-            subprocess.run(["git", "remote", "set-url", "origin", repo_url_with_creds], cwd=str(REPO_PATH), check=True, capture_output=True)
+            # Configure credentials based on repository type
+            if repo_type == REPO_TYPES['GITLAB'] and 'ssh_private_key_path' in user_data:
+                # Use SSH URL for GitLab
+                ssh_private_key = user_data['ssh_private_key_path']
+                # Convert HTTPS URL to SSH format
+                ssh_url = convert_https_to_ssh(repo_url)
+                # Configure SSH key for this operation
+                configure_ssh_for_git_operation(ssh_private_key)
+                subprocess.run(["git", "remote", "set-url", "origin", ssh_url], cwd=str(REPO_PATH), check=True, capture_output=True)
+            elif repo_type == REPO_TYPES['GITLAB']:
+                # Use GitLab OAuth2 format (fallback)
+                repo_url_with_creds = "https://oauth2:" + password + "@" + repo_url.replace("https://", "")
+                subprocess.run(["git", "remote", "set-url", "origin", repo_url_with_creds], cwd=str(REPO_PATH), check=True, capture_output=True)
+            else:
+                # GitHub format
+                repo_url_with_creds = "https://" + username + ":" + password + "@" + repo_url.replace("https://", "")
+                subprocess.run(["git", "remote", "set-url", "origin", repo_url_with_creds], cwd=str(REPO_PATH), check=True, capture_output=True)
             
             # Pull latest changes
             try:
@@ -906,13 +2170,38 @@ async def process_password(message, state=None):
                 pass
         else:
             # If not a git repo yet, we need to clone
-            # Use the URL with credentials for cloning
-            repo_url_with_creds = "https://" + username + ":" + password + "@" + repo_url.replace("https://", "")
-            subprocess.run(["git", "clone", repo_url_with_creds, str(REPO_PATH)], check=True, capture_output=True)
+            if repo_type == REPO_TYPES['GITLAB'] and 'ssh_private_key_path' in user_data:
+                # Use SSH for GitLab
+                ssh_private_key = user_data['ssh_private_key_path']
+                ssh_url = convert_https_to_ssh(repo_url)
+                configure_ssh_for_git_operation(ssh_private_key)
+                subprocess.run(["git", "clone", ssh_url, str(REPO_PATH)], check=True, capture_output=True)
+            elif repo_type == REPO_TYPES['GITLAB']:
+                # Use OAuth2 format (fallback)
+                repo_url_with_creds = "https://oauth2:" + password + "@" + repo_url.replace("https://", "")
+                subprocess.run(["git", "clone", repo_url_with_creds, str(REPO_PATH)], check=True, capture_output=True)
+            else:
+                # GitHub format
+                repo_url_with_creds = "https://" + username + ":" + password + "@" + repo_url.replace("https://", "")
+                subprocess.run(["git", "clone", repo_url_with_creds, str(REPO_PATH)], check=True, capture_output=True)
         # Ensure git-lfs is available and initialized in the repo
         try:
             subprocess.run(["git", "lfs", "install"], cwd=str(REPO_PATH), check=True, capture_output=True)
             subprocess.run(["git", "lfs", "fetch"], cwd=str(REPO_PATH), check=True, capture_output=True)
+            
+            # Configure LFS based on repository type
+            repo_type = user_data.get('repo_type', REPO_TYPES['GITHUB'])
+            if repo_type == REPO_TYPES['GITLAB']:
+                # Configure GitLab-specific LFS settings
+                subprocess.run(["git", "config", "lfs.url", "https://gitlab.com"], cwd=str(REPO_PATH), check=True, capture_output=True)
+                # Set up GitLab LFS credentials
+                lfs_cred_content = f"https://oauth2:{password}@gitlab.com\n"
+                lfs_cred_file = Path("/app/data") / f".git-credentials-lfs-{message.from_user.id}"
+                lfs_cred_file.write_text(lfs_cred_content)
+                lfs_cred_file.chmod(0o600)
+                subprocess.run(["git", "config", "credential.helper", f"store --file={lfs_cred_file}"], 
+                              cwd=str(REPO_PATH), check=True, capture_output=True)
+                
         except subprocess.CalledProcessError:
             # If git-lfs commands fail, continue but inform user
             await message.answer("⚠️ Внимание: git-lfs не установлен или команда завершилась с ошибкой. Блокировки LFS могут не работать.")
@@ -2880,6 +4169,14 @@ async def go_back(message, state=None):
 async def main():
     # Initialize personal credentials system on startup
     initialize_persistent_credentials()
+    
+    # Migrate user repos format if needed
+    try:
+        migrated = migrate_user_repos_format()
+        if migrated:
+            logging.info("User repositories format migrated to support VCS types")
+    except Exception as e:
+        logging.error(f"Failed to migrate user repos format: {e}")
     
     logging.info("GitHub DOCX Document Management Bot запущен!")
     logging.info(f"Репозиторий: {REPO_PATH}")
