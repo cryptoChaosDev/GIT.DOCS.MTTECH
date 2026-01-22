@@ -2373,11 +2373,22 @@ async def handle_doc_selection(message):
     # Set selected document in user's session
     user_doc_sessions[message.from_user.id] = {'doc': doc_name}
     repo_root = get_repo_for_user_id(message.from_user.id)
-    doc_path = repo_root / "docs" / doc_name
     
-    if not doc_path.exists():
+    # Search for document in entire repository (not just docs/ directory)
+    doc_path = None
+    for file_path in repo_root.rglob(doc_name):
+        # Check if it's a .docx file and not in hidden/system directories
+        if (file_path.suffix.lower() == '.docx' and 
+            not any(part.startswith('.') for part in file_path.parts) and
+            '.git' not in file_path.parts and
+            '__pycache__' not in file_path.parts and
+            'node_modules' not in file_path.parts):
+            doc_path = file_path
+            break
+    
+    if not doc_path or not doc_path.exists():
         # Document doesn't exist - return to document list
-        logging.warning(f"Document not found: {doc_name} at path {doc_path}")
+        logging.warning(f"Document not found: {doc_name} in repository {repo_root}")
         await list_documents(message)
         return
     
@@ -2464,8 +2475,19 @@ async def download_document(message):
     session = user_doc_sessions.get(message.from_user.id)
     if session and session.get('doc'):
         doc_name = session['doc']
-        doc_path = repo_root / 'docs' / doc_name
-        if not doc_path.exists():
+        
+        # Search for document in entire repository
+        doc_path = None
+        for file_path in repo_root.rglob(doc_name):
+            if (file_path.suffix.lower() == '.docx' and 
+                not any(part.startswith('.') for part in file_path.parts) and
+                '.git' not in file_path.parts and
+                '__pycache__' not in file_path.parts and
+                'node_modules' not in file_path.parts):
+                doc_path = file_path
+                break
+                
+        if not doc_path or not doc_path.exists():
             await message.answer(f"❌ Документ {doc_name} не найден!", reply_markup=get_main_keyboard())
             return
         # Prefer message-level send_document (PTBMessageAdapter) which uses context.bot when available
@@ -2548,8 +2570,18 @@ async def handle_doc_name_input(message):
         repo_root = await require_user_repo(type('M', (), {'from_user': type('U', (), {'id': user_id}), 'answer': message.answer}))
         if not repo_root:
             return
-        doc_path = repo_root / 'docs' / doc_name
-        if not doc_path.exists():
+        # Search for document in entire repository
+        doc_path = None
+        for file_path in repo_root.rglob(doc_name):
+            if (file_path.suffix.lower() == '.docx' and 
+                not any(part.startswith('.') for part in file_path.parts) and
+                '.git' not in file_path.parts and
+                '__pycache__' not in file_path.parts and
+                'node_modules' not in file_path.parts):
+                doc_path = file_path
+                break
+                
+        if not doc_path or not doc_path.exists():
             await message.answer(f"❌ Документ {doc_name} не найден!", reply_markup=get_main_keyboard())
             return
         try:
@@ -2767,10 +2799,26 @@ async def handle_document_upload(message):
         # Use the expected document name
         doc_name = expected_doc_name
     
-    doc_path = repo_root / "docs" / doc_name
+    # Search for document in entire repository or create in docs/ if uploading new
+    doc_path = None
+    for file_path in repo_root.rglob(doc_name):
+        if (file_path.suffix.lower() == '.docx' and 
+            not any(part.startswith('.') for part in file_path.parts) and
+            '.git' not in file_path.parts and
+            '__pycache__' not in file_path.parts and
+            'node_modules' not in file_path.parts):
+            doc_path = file_path
+            break
+    
+    # If document not found, create path in docs/ directory for new uploads
+    if not doc_path:
+        docs_dir = repo_root / "docs"
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        doc_path = docs_dir / doc_name
     
     # Check LFS lock status (Git LFS is now the only lock mechanism)
-    rel_path = str((Path('docs') / doc_name).as_posix())
+    # Use relative path from repository root
+    rel_path = str(doc_path.relative_to(repo_root)).replace('\\', '/')
     lfs_lock_info = get_lfs_lock_info(rel_path, cwd=repo_root)
     
     # Check if locked by another user
