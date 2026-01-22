@@ -3254,7 +3254,9 @@ async def handle_document_upload(message):
             # If file is locked by current user, unlock it temporarily for push
             if lfs_lock_info and lfs_lock_info.get('owner') == str(message.from_user.id):
                 try:
-                    subprocess.run(["git", "lfs", "unlock", rel_path], cwd=str(repo_root), check=True, capture_output=True)
+                    # Use only filename to avoid protocol issues
+                    temp_filename = Path(rel_path).name
+                    subprocess.run(["git", "lfs", "unlock", temp_filename], cwd=str(repo_root), check=True, capture_output=True)
                     logging.info(f"Temporarily unlocked {doc_name} for push")
                 except subprocess.CalledProcessError:
                     # If unlock fails, continue anyway - might not be critical
@@ -3276,7 +3278,9 @@ async def handle_document_upload(message):
                 # Re-lock the file after successful push if it was unlocked
                 if lfs_lock_info and lfs_lock_info.get('owner') == str(message.from_user.id):
                     try:
-                        subprocess.run(["git", "lfs", "lock", rel_path], cwd=str(repo_root), check=True, capture_output=True)
+                        # Use only filename to avoid protocol issues
+                        temp_filename = Path(rel_path).name
+                        subprocess.run(["git", "lfs", "lock", temp_filename], cwd=str(repo_root), check=True, capture_output=True)
                         logging.info(f"Re-locked {doc_name} after push")
                     except subprocess.CalledProcessError:
                         # If re-lock fails, continue - file will remain unlocked
@@ -3465,10 +3469,10 @@ async def unlock_document_by_name(message, doc_name: str):
         await message.answer(f"❌ У вас нет прав для разблокировки документа {doc_name} (владелец {lfs_lock_info.get('owner', 'unknown')}).", reply_markup=get_document_keyboard(doc_name, is_locked=True, can_unlock=False))
         return
     # Try to unlock via git-lfs
-    # Use relative path from repository root with proper formatting
-    rel_path = str(doc_path.relative_to(repo_root)).replace('\\', '/')
+    # Use only filename to avoid protocol issues with SSH repositories
+    filename_only = doc_path.name
     try:
-        proc = subprocess.run(["git", "lfs", "unlock", rel_path], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        proc = subprocess.run(["git", "lfs", "unlock", filename_only], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
         # Return to document menu
         reply_markup = get_document_keyboard(doc_name, is_locked=False)
         await message.answer(f"🔓 Документ {doc_name} успешно разблокирован через git-lfs!\n{proc.stdout.strip()}", reply_markup=reply_markup)
@@ -3492,7 +3496,7 @@ async def unlock_document_by_name(message, doc_name: str):
                 subprocess.run(["git", "add", rel], cwd=str(repo_root), check=True, capture_output=True)
                 subprocess.run(["git", "commit", "-m", f"Auto-commit for unlock {doc_name}"], cwd=str(repo_root), check=True, capture_output=True)
                 # Retry unlock
-                proc2 = subprocess.run(["git", "lfs", "unlock", rel], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+                proc2 = subprocess.run(["git", "lfs", "unlock", filename_only], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
                 # Return to document menu
                 reply_markup = get_document_keyboard(doc_name, is_locked=False)
                 await message.answer(f"🔓 Документ {doc_name} разблокирован после авто-коммита: {proc2.stdout.strip()}", reply_markup=reply_markup)
@@ -3570,11 +3574,11 @@ async def lock_document_by_name(message, doc_name: str):
     
     # Create lock
     # Try to lock via git-lfs first (so others see it)
-    # Use relative path from repository root with proper formatting
-    rel_path = str(doc_path.relative_to(repo_root)).replace('\\', '/')
+    # Use only filename to avoid protocol issues with SSH repositories
+    filename_only = doc_path.name
     try:
         # Simple call - credentials are stored globally
-        proc = subprocess.run(["git", "lfs", "lock", rel_path], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        proc = subprocess.run(["git", "lfs", "lock", filename_only], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
         # Git LFS lock created successfully - no local lock needed
         # Return to document menu
         reply_markup = get_document_keyboard(doc_name, is_locked=True, can_unlock=True)
@@ -3618,6 +3622,7 @@ async def check_lock_status(message):
             return
             
         # First try git-lfs locks (may show deprecation warning)
+        # Note: We use the command but expect deprecation warnings for GitLab
         proc = subprocess.run(["git", "lfs", "locks"], cwd=str(repo_root), capture_output=True, text=True, encoding='utf-8', errors='replace')
         
         # Log deprecation warning if present
@@ -4127,10 +4132,10 @@ async def force_unlock_by_name(message, doc_name: str):
         await message.answer(f"❌ Документ {doc_name} не найден!", reply_markup=get_document_keyboard(doc_name, is_locked=False))
         return
     
-    # Use relative path from repository root with proper formatting
-    rel_path = str(doc_path.relative_to(repo_root)).replace('\\', '/')
+    # Use only filename to avoid protocol issues with SSH repositories
+    filename_only = doc_path.name
     try:
-        proc = subprocess.run(["git", "lfs", "unlock", "--force", rel_path], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        proc = subprocess.run(["git", "lfs", "unlock", "--force", filename_only], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
         await message.answer(f"🔓 Документ {doc_name} успешно принудительно разблокирован (git-lfs).\n{proc.stdout.strip()}", reply_markup=get_document_keyboard(doc_name, is_locked=False))
     except subprocess.CalledProcessError as e:
         err = (e.stderr or e.stdout or '').strip()
