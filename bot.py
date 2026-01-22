@@ -581,6 +581,17 @@ def configure_ssh_for_git_operation(private_key_path: str, repo_path: str = None
             subprocess.run(["git", "config", "core.sshCommand", f"ssh -i {private_key_path} -o StrictHostKeyChecking=no"], 
                           cwd=repo_path, capture_output=True)
             logging.info(f"Configured SSH key for repo {repo_path}: {private_key_path}")
+            
+            # Save Git configuration for persistence
+            try:
+                # Extract user_id from repo_path if possible
+                import re
+                user_id_match = re.search(r'/user_repos/(\d+)/?', repo_path)
+                if user_id_match:
+                    user_id = int(user_id_match.group(1))
+                    save_git_config_to_user_data(user_id, repo_path)
+            except (ValueError, TypeError, AttributeError):
+                pass
         else:
             logging.info(f"Configured global SSH key: {private_key_path}")
             
@@ -4509,6 +4520,8 @@ async def handle_repo_action_simple(msg, action):
     if repo_url and 'gitlab.' in repo_url:
         try:
             configure_gitlab_credentials(str(repo_dir), username, password, user_id)
+            # Save Git configuration for persistence
+            save_git_config_to_user_data(user_id, str(repo_dir))
         except Exception as e:
             logging.warning(f"Failed to configure GitLab credentials: {e}")
     
@@ -4559,6 +4572,18 @@ async def go_back(message, state=None):
 async def main():
     # Initialize personal credentials system on startup
     initialize_persistent_credentials()
+    
+    # Apply saved Git configurations for all users
+    try:
+        user_repos = load_user_repos()
+        for user_id_str in user_repos.keys():
+            try:
+                user_id = int(user_id_str)
+                apply_user_git_config(user_id)
+            except (ValueError, TypeError):
+                continue
+    except Exception as e:
+        logging.error(f"Failed to apply user Git configs: {e}")
     
     # Migrate user repos format if needed
     try:
@@ -5363,6 +5388,8 @@ async def continue_gitlab_setup_after_ssh(message, user_id, repo_url, ssh_setup_
         if ssh_match:
             gitlab_host = ssh_match.group(1)
             subprocess.run(["git", "config", "lfs.url", f"https://{gitlab_host}"], cwd=str(repo_path), check=True, capture_output=True)
+            # Save Git configuration for persistence
+            save_git_config_to_user_data(user_id, str(repo_path))
         
         # Update user data with SSH key info
         user_repos = load_user_repos()
@@ -5473,6 +5500,61 @@ async def save_user_changes(message):
     if message.from_user.id in user_sessions:
         del user_sessions[message.from_user.id]
         globals()['user_edit_sessions'] = user_sessions
+
+
+def apply_user_git_config(user_id: int):
+    """Apply saved Git configuration for user"""
+    user_repos = load_user_repos()
+    
+    for key, repo_data in user_repos.items():
+        if str(repo_data.get('telegram_id')) == str(user_id):
+            repo_path = repo_data.get('repo_path')
+            git_config = repo_data.get('git_config', {})
+            
+            if repo_path and os.path.exists(repo_path):
+                # Apply each Git config setting
+                for config_key, config_value in git_config.items():
+                    try:
+                        subprocess.run([
+                            "git", "config", config_key, config_value
+                        ], cwd=repo_path, check=True, capture_output=True)
+                        logging.info(f"Applied Git config {config_key}={config_value} for user {user_id}")
+                    except Exception as e:
+                        logging.warning(f"Failed to apply Git config {config_key}: {e}")
+            break
+
+
+def save_git_config_to_user_data(user_id: int, repo_path: str):
+    """Save current Git configuration to user data for persistence"""
+    try:
+        # Get current Git config
+        git_config = {}
+        config_items = [
+            "lfs.url",
+            "core.sshCommand"
+        ]
+        
+        for config_key in config_items:
+            try:
+                result = subprocess.run([
+                    "git", "config", "--get", config_key
+                ], cwd=repo_path, capture_output=True, text=True)
+                if result.returncode == 0 and result.stdout.strip():
+                    git_config[config_key] = result.stdout.strip()
+            except Exception:
+                pass
+        
+        # Save to user_repos.json
+        user_repos = load_user_repos()
+        for key, repo_data in user_repos.items():
+            if str(repo_data.get('telegram_id')) == str(user_id):
+                user_repos[key]['git_config'] = git_config
+                save_user_repos(user_repos)
+                logging.info(f"Saved Git config for user {user_id}: {git_config}")
+                break
+                
+    except Exception as e:
+        logging.error(f"Failed to save Git config for user {user_id}: {e}")
 
 
 if __name__ == "__main__":
