@@ -1041,9 +1041,9 @@ def get_user_repo(user_id: int, git_username: str = None):
         # Fallback: look for any entry with this user_id
         
     # Find any entry for this user_id
-    for key, repo_info in m.items():
-        if str(repo_info.get('telegram_id')) == str(user_id):
-            return repo_info
+    for key, repo_data in m.items():
+        if str(repo_data.get('telegram_id')) == str(user_id):
+            return repo_data
     
     return None
 
@@ -1109,8 +1109,8 @@ class VCSConfigurationManager:
                 target_key = f"{user_id}:{git_username}"
             else:
                 # Find any entry for this user
-                for key, repo_info in user_repos.items():
-                    if str(repo_info.get('telegram_id')) == str(user_id):
+                for key, repo_data in user_repos.items():
+                    if str(repo_data.get('telegram_id')) == str(user_id):
                         target_key = key
                         break
             
@@ -1239,19 +1239,19 @@ def migrate_user_repos_format() -> bool:
         user_repos = load_user_repos()
         migrated = False
         
-        for key, repo_info in user_repos.items():
+        for key, repo_data in user_repos.items():
             # Add missing fields
-            if 'repo_type' not in repo_info:
-                repo_url = repo_info.get('repo_url', '')
-                repo_info['repo_type'] = detect_repository_type(repo_url)
+            if 'repo_type' not in repo_data:
+                repo_url = repo_data.get('repo_url', '')
+                repo_data['repo_type'] = detect_repository_type(repo_url)
                 migrated = True
             
-            if 'last_updated' not in repo_info:
-                repo_info['last_updated'] = repo_info.get('created_at', datetime.now().isoformat())
+            if 'last_updated' not in repo_data:
+                repo_data['last_updated'] = repo_data.get('created_at', datetime.now().isoformat())
                 migrated = True
             
-            if 'auth_token' not in repo_info:
-                repo_info['auth_token'] = None
+            if 'auth_token' not in repo_data:
+                repo_data['auth_token'] = None
                 migrated = True
         
         if migrated:
@@ -2417,7 +2417,7 @@ async def handle_doc_selection(message):
         telegram_username = None
         
         # Try to find user by GitHub username in our user mapping
-        for user_id, repo_info in user_repos.items():
+        for user_id, repo_data in user_repos.items():
             if repo_info.get('git_username') == lock_owner_id:
                 # Found user with matching GitHub username, get their Telegram username
                 telegram_username = repo_info.get('telegram_username')
@@ -2820,7 +2820,7 @@ async def handle_document_upload(message):
         
         # Get Telegram username for lock owner
         telegram_username = None
-        for user_id, repo_info in user_repos.items():
+        for user_id, repo_data in user_repos.items():
             if repo_info.get('git_username') == lock_owner:
                 telegram_username = repo_info.get('telegram_username')
                 if telegram_username and not telegram_username.startswith('@'):
@@ -3293,7 +3293,7 @@ async def lock_document_by_name(message, doc_name: str):
             
             # Get Telegram username for lock owner
             telegram_username = None
-            for user_id, repo_info in user_repos.items():
+            for user_id, repo_data in user_repos.items():
                 if repo_info.get('git_username') == lock_owner:
                     telegram_username = repo_info.get('telegram_username')
                     if telegram_username and not telegram_username.startswith('@'):
@@ -4369,8 +4369,8 @@ async def main():
                     # For GitLab, we already have SSH setup, just need username
                     # Update user data
                     user_repos = load_user_repos()
-                    for key, repo_info in user_repos.items():
-                        if str(repo_info.get('telegram_id')) == str(user_id):
+                    for key, repo_data in user_repos.items():
+                        if str(repo_data.get('telegram_id')) == str(user_id):
                             user_repos[key]['git_username'] = git_username
                             break
                     save_user_repos(user_repos)
@@ -4624,10 +4624,10 @@ async def show_users_management(message):
     
     keyboard = []
     
-    for key, repo_info in user_repos.items():
-        telegram_id = repo_info.get('telegram_id', 'unknown')
-        telegram_username = repo_info.get('telegram_username', 'не задан')
-        git_username = repo_info.get('git_username', 'не задан')
+    for key, repo_data in user_repos.items():
+        telegram_id = repo_data.get('telegram_id', 'unknown')
+        telegram_username = repo_data.get('telegram_username', 'не задан')
+        git_username = repo_data.get('git_username', 'не задан')
         repo_url = repo_info.get('repo_url', 'не задан')
         
         user_list += f"👤 ID: {telegram_id}\n"
@@ -4662,10 +4662,10 @@ async def show_user_edit_menu(message, target_user_id):
     user_info = None
     user_key = None
     
-    for key, repo_info in user_repos.items():
-        if str(repo_info.get('telegram_id')) == str(target_user_id):
+    for key, repo_data in user_repos.items():
+        if str(repo_data.get('telegram_id')) == str(target_user_id):
             user_key = key
-            user_info = repo_info
+            user_info = repo_data
             break
     
     if not user_info:
@@ -4827,8 +4827,8 @@ async def perform_user_repo_setup(message, session, repo_url):
             
             # Update user data with SSH key info
             user_repos = load_user_repos()
-            for key, repo_info in user_repos.items():
-                if str(repo_info.get('telegram_id')) == str(user_id):
+            for key, repo_data in user_repos.items():
+                if str(repo_data.get('telegram_id')) == str(user_id):
                     user_repos[key]['repo_url'] = repo_url
                     user_repos[key]['repo_type'] = REPO_TYPES['GITLAB']
                     user_repos[key]['ssh_private_key_path'] = ssh_setup_result.get('private_key_path')
@@ -4838,8 +4838,8 @@ async def perform_user_repo_setup(message, session, repo_url):
         else:
             # Update user data for GitHub/other repositories
             user_repos = load_user_repos()
-            for key, repo_info in user_repos.items():
-                if str(repo_info.get('telegram_id')) == str(user_id):
+            for key, repo_data in user_repos.items():
+                if str(repo_data.get('telegram_id')) == str(user_id):
                     user_repos[key]['repo_url'] = repo_url
                     user_repos[key]['repo_type'] = repo_type
                     break
