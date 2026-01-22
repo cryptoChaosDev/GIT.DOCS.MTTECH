@@ -2393,7 +2393,8 @@ async def handle_doc_selection(message):
         return
     
     # Check if file is locked via Git LFS
-    rel_path = str((Path('docs') / doc_name).as_posix())
+    # Use relative path from repository root
+    rel_path = str(doc_path.relative_to(repo_root)).replace('\\', '/')
     try:
         lfs_lock_info = get_lfs_lock_info(rel_path, cwd=repo_root)
         is_locked = lfs_lock_info is not None
@@ -3073,7 +3074,8 @@ async def handle_document_upload(message):
         # Push to remote only if commit was created
         if commit_created:
             # Check if file is locked by LFS and unlock it temporarily if needed
-            rel_path = str((Path('docs') / doc_name).as_posix())
+            # Use relative path from repository root
+            rel_path = str(doc_path.relative_to(repo_root)).replace('\\', '/')
             lfs_lock_info = get_lfs_lock_info(rel_path, cwd=repo_root)
             
             # If file is locked by current user, unlock it temporarily for push
@@ -3138,7 +3140,8 @@ async def handle_document_upload(message):
         # Return to document menu after upload
         # doc_name is already set correctly (either from session or from uploaded file name)
         # Check if document is locked via Git LFS
-        rel_path = str((Path('docs') / doc_name).as_posix())
+        # Use relative path from repository root
+        rel_path = str(doc_path.relative_to(repo_root)).replace('\\', '/')
         try:
             lfs_lock_info = get_lfs_lock_info(rel_path, cwd=repo_root)
             is_locked = lfs_lock_info is not None
@@ -3238,14 +3241,25 @@ async def unlock_document(message):
 
 async def unlock_document_by_name(message, doc_name: str):
     repo_root = get_repo_for_user_id(message.from_user.id)
-    doc_path = repo_root / "docs" / doc_name
-
-    if not doc_path.exists():
+    
+    # Search for document in entire repository
+    doc_path = None
+    for file_path in repo_root.rglob(doc_name):
+        if (file_path.suffix.lower() == '.docx' and 
+            not any(part.startswith('.') for part in file_path.parts) and
+            '.git' not in file_path.parts and
+            '__pycache__' not in file_path.parts and
+            'node_modules' not in file_path.parts):
+            doc_path = file_path
+            break
+    
+    if not doc_path or not doc_path.exists():
         await message.answer(f"❌ Документ {doc_name} не найден!", reply_markup=get_document_keyboard(doc_name, is_locked=False))
         return
 
     # Check if document is locked via Git LFS
-    rel = str((Path('docs') / doc_name).as_posix())
+    # Use relative path from repository root
+    rel = str(doc_path.relative_to(repo_root)).replace('\\', '/')
     try:
         lfs_lock_info = get_lfs_lock_info(rel, cwd=repo_root)
         is_locked = lfs_lock_info is not None
@@ -3278,6 +3292,8 @@ async def unlock_document_by_name(message, doc_name: str):
         await message.answer(f"❌ У вас нет прав для разблокировки документа {doc_name} (владелец {lfs_lock_info.get('owner', 'unknown')}).", reply_markup=get_document_keyboard(doc_name, is_locked=True, can_unlock=False))
         return
     # Try to unlock via git-lfs
+    # Use relative path from repository root
+    rel = str(doc_path.relative_to(repo_root)).replace('\\', '/')
     try:
         proc = subprocess.run(["git", "lfs", "unlock", rel], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
         # Return to document menu
@@ -3303,7 +3319,7 @@ async def unlock_document_by_name(message, doc_name: str):
                 subprocess.run(["git", "add", rel], cwd=str(repo_root), check=True, capture_output=True)
                 subprocess.run(["git", "commit", "-m", f"Auto-commit for unlock {doc_name}"], cwd=str(repo_root), check=True, capture_output=True)
                 # Retry unlock
-                proc2 = subprocess.run(["git", "lfs", "unlock", rel], cwd=str(REPO_PATH), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+                proc2 = subprocess.run(["git", "lfs", "unlock", rel], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
                 # Return to document menu
                 reply_markup = get_document_keyboard(doc_name, is_locked=False)
                 await message.answer(f"🔓 Документ {doc_name} разблокирован после авто-коммита: {proc2.stdout.strip()}", reply_markup=reply_markup)
@@ -3325,15 +3341,25 @@ async def unlock_document_by_name(message, doc_name: str):
 
 async def lock_document_by_name(message, doc_name: str):
     repo_root = get_repo_for_user_id(message.from_user.id)
-    doc_path = repo_root / "docs" / doc_name
     
-    if not doc_path.exists():
+    # Search for document in entire repository
+    doc_path = None
+    for file_path in repo_root.rglob(doc_name):
+        if (file_path.suffix.lower() == '.docx' and 
+            not any(part.startswith('.') for part in file_path.parts) and
+            '.git' not in file_path.parts and
+            '__pycache__' not in file_path.parts and
+            'node_modules' not in file_path.parts):
+            doc_path = file_path
+            break
+    
+    if not doc_path or not doc_path.exists():
         await message.answer(f"❌ Документ {doc_name} не найден!", reply_markup=get_document_keyboard(doc_name, is_locked=False))
         return
     
     # Check if already locked via Git LFS
-    rel = str((Path('docs') / doc_name).as_posix())
-    repo_root = get_repo_for_user_id(message.from_user.id)
+    # Use relative path from repository root
+    rel = str(doc_path.relative_to(repo_root)).replace('\\', '/')
     try:
         lfs_lock_info = get_lfs_lock_info(rel, cwd=repo_root)
         if lfs_lock_info:
@@ -3371,7 +3397,8 @@ async def lock_document_by_name(message, doc_name: str):
     
     # Create lock
     # Try to lock via git-lfs first (so others see it)
-    rel = str((Path('docs') / doc_name).as_posix())
+    # Use relative path from repository root
+    rel = str(doc_path.relative_to(repo_root)).replace('\\', '/')
     try:
         # Simple call - credentials are stored globally
         proc = subprocess.run(["git", "lfs", "lock", rel], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
@@ -3878,8 +3905,24 @@ async def force_unlock_by_name(message, doc_name: str):
         await message.answer("❌ У вас нет прав для принудительной разблокировки.", reply_markup=get_main_keyboard(user_id=message.from_user.id))
         return
 
-    rel = str((Path('docs') / doc_name).as_posix())
+    # Search for document in entire repository
     repo_root = get_repo_for_user_id(message.from_user.id)
+    doc_path = None
+    for file_path in repo_root.rglob(doc_name):
+        if (file_path.suffix.lower() == '.docx' and 
+            not any(part.startswith('.') for part in file_path.parts) and
+            '.git' not in file_path.parts and
+            '__pycache__' not in file_path.parts and
+            'node_modules' not in file_path.parts):
+            doc_path = file_path
+            break
+    
+    if not doc_path or not doc_path.exists():
+        await message.answer(f"❌ Документ {doc_name} не найден!", reply_markup=get_document_keyboard(doc_name, is_locked=False))
+        return
+    
+    # Use relative path from repository root
+    rel = str(doc_path.relative_to(repo_root)).replace('\\', '/')
     try:
         proc = subprocess.run(["git", "lfs", "unlock", "--force", rel], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
         await message.answer(f"🔓 Документ {doc_name} успешно принудительно разблокирован (git-lfs).\n{proc.stdout.strip()}", reply_markup=get_document_keyboard(doc_name, is_locked=False))
