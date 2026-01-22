@@ -569,13 +569,21 @@ def convert_https_to_ssh(https_url: str) -> str:
         logging.error(f"Failed to convert HTTPS to SSH URL: {e}")
         return https_url
 
-def configure_ssh_for_git_operation(private_key_path: str):
+def configure_ssh_for_git_operation(private_key_path: str, repo_path: str = None):
     """Configure SSH key for Git operation"""
     try:
         import os
         # Set GIT_SSH_COMMAND to use specific private key
         os.environ['GIT_SSH_COMMAND'] = f"ssh -i {private_key_path} -o StrictHostKeyChecking=no"
-        logging.info(f"Configured SSH key: {private_key_path}")
+        
+        # Also configure core.sshCommand in repository config for Git LFS
+        if repo_path:
+            subprocess.run(["git", "config", "core.sshCommand", f"ssh -i {private_key_path} -o StrictHostKeyChecking=no"], 
+                          cwd=repo_path, capture_output=True)
+            logging.info(f"Configured SSH key for repo {repo_path}: {private_key_path}")
+        else:
+            logging.info(f"Configured global SSH key: {private_key_path}")
+            
     except Exception as e:
         logging.error(f"Failed to configure SSH for Git: {e}")
 
@@ -2306,7 +2314,7 @@ async def process_password(message, state=None):
                 # Convert HTTPS URL to SSH format
                 ssh_url = convert_https_to_ssh(repo_url)
                 # Configure SSH key for this operation
-                configure_ssh_for_git_operation(ssh_private_key)
+                configure_ssh_for_git_operation(ssh_private_key, str(REPO_PATH))
                 subprocess.run(["git", "remote", "set-url", "origin", ssh_url], cwd=str(REPO_PATH), check=True, capture_output=True)
             elif repo_type == REPO_TYPES['GITLAB']:
                 # Use GitLab OAuth2 format (fallback)
@@ -2330,7 +2338,7 @@ async def process_password(message, state=None):
                 # Use SSH for GitLab
                 ssh_private_key = user_data['ssh_private_key_path']
                 ssh_url = convert_https_to_ssh(repo_url)
-                configure_ssh_for_git_operation(ssh_private_key)
+                configure_ssh_for_git_operation(ssh_private_key, str(REPO_PATH))
                 subprocess.run(["git", "clone", ssh_url, str(REPO_PATH)], check=True, capture_output=True)
             elif repo_type == REPO_TYPES['GITLAB']:
                 # Use OAuth2 format (fallback)
@@ -5245,7 +5253,7 @@ async def continue_gitlab_setup_after_ssh(message, user_id, repo_url, ssh_setup_
         ssh_url = convert_https_to_ssh(repo_url)
         
         # Configure SSH for this operation
-        configure_ssh_for_git_operation(ssh_setup_result['private_key_path'])
+        configure_ssh_for_git_operation(ssh_setup_result['private_key_path'], str(repo_path))
         
         # Check if user exists, if not - create basic user entry
         user_repo = get_user_repo(user_id)
