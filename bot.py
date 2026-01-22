@@ -4348,27 +4348,57 @@ async def main():
             user_sessions = globals().get('user_edit_sessions', {})
             session = user_sessions.get(msg.from_user.id)
             
-            # Handle GitHub username collection
+            # Handle Git username collection (works for both GitHub and GitLab)
             if session and session.get('collect_git_username'):
                 git_username = text.strip()
                 if git_username.startswith('@'):
                     git_username = git_username[1:]  # Remove @ prefix
                 
-                # Store username and switch to collecting PAT
+                # Store username and determine next step based on repository type
                 user_id = session['user_id']
+                repo_type = session.get('repo_type', REPO_TYPES['GITHUB'])
+                repo_url = session.get('repo_url', '')
+                
                 user_sessions = globals().get('user_edit_sessions', {})
                 user_sessions[user_id]['git_username'] = git_username
                 user_sessions[user_id]['collect_git_username'] = False
-                user_sessions[user_id]['collect_pat'] = True
                 globals()['user_edit_sessions'] = user_sessions
                 
-                await msg.answer(
-                    f"✅ GitHub username ({git_username}) сохранен!\n\n"
-                    f"🔑 Теперь введите ваш Personal Access Token (PAT) для GitHub:\n"
-                    f"(Создайте его на GitHub: Settings → Developer settings → Personal access tokens)\n\n"
-                    f"⚠️ ВНИМАНИЕ: Это НЕ ваш пароль от GitHub!\n"
-                    f"Токен должен иметь права `repo`"
-                )
+                # Different messages based on repository type
+                if repo_type == REPO_TYPES['GITLAB']:
+                    # For GitLab, we already have SSH setup, just need username
+                    # Update user data
+                    user_repos = load_user_repos()
+                    for key, repo_info in user_repos.items():
+                        if str(repo_info.get('telegram_id')) == str(user_id):
+                            user_repos[key]['git_username'] = git_username
+                            break
+                    save_user_repos(user_repos)
+                    
+                    # Clear session
+                    user_sessions = globals().get('user_edit_sessions', {})
+                    del user_sessions[msg.from_user.id]
+                    globals()['user_edit_sessions'] = user_sessions
+                    
+                    await msg.answer(
+                        f"✅ Отлично! Репозиторий полностью настроен через SSH!\n\n"
+                        f"📁 Репозиторий: {repo_url}\n"
+                        f"👤 GitLab пользователь: {git_username}\n\n"
+                        f"Теперь вы можете работать с документами.\n"
+                        f"Git операции будут использовать SSH аутентификацию."
+                    )
+                else:
+                    # For GitHub, continue with PAT collection
+                    user_sessions[user_id]['collect_pat'] = True
+                    globals()['user_edit_sessions'] = user_sessions
+                    
+                    await msg.answer(
+                        f"✅ GitHub username ({git_username}) сохранен!\n\n"
+                        f"🔑 Теперь введите ваш Personal Access Token (PAT) для GitHub:\n"
+                        f"(Создайте его на GitHub: Settings → Developer settings → Personal access tokens)\n\n"
+                        f"⚠️ ВНИМАНИЕ: Это НЕ ваш пароль от GitHub!\n"
+                        f"Токен должен иметь права `repo`"
+                    )
                 return
             
             # Handle PAT collection
@@ -4723,9 +4753,35 @@ async def update_user_field(message, field_name, new_value):
 
 
 async def perform_user_repo_setup(message, session, repo_url):
-    """Execute user's own repository setup"""
+    """Execute user's own repository setup with VCS-specific authentication"""
     try:
         user_id = session['user_id']
+        
+        # Detect repository type
+        repo_type = detect_repository_type(repo_url)
+        await message.answer(f"🔍 Обнаружен тип репозитория: {repo_type.upper()}")
+        
+        # For GitLab repositories, check if SSH setup is needed
+        if repo_type == REPO_TYPES['GITLAB']:
+            # Setup SSH access for GitLab
+            ssh_setup_result = setup_gitlab_ssh_access(user_id, repo_url)
+            if not ssh_setup_result['success']:
+                await message.answer(f"❌ Ошибка настройки SSH для GitLab: {ssh_setup_result['error']}")
+                return
+            
+            # Send SSH setup instructions to user
+            await message.answer(ssh_setup_result['instructions'])
+            
+            # Use SSH URL for cloning
+            ssh_url = convert_https_to_ssh(repo_url)
+            repo_url_to_use = ssh_url
+            
+            # Configure SSH for this operation
+            configure_ssh_for_git_operation(ssh_setup_result['private_key_path'])
+            
+        else:
+            # For GitHub or unknown repositories, use HTTPS
+            repo_url_to_use = repo_url
         
         # Check if user exists, if not - create basic user entry
         user_repo = get_user_repo(user_id)
@@ -4755,36 +4811,62 @@ async def perform_user_repo_setup(message, session, repo_url):
             shutil.rmtree(repo_path)
             await message.answer("🗑️ Старый репозиторий удален")
         
-        # Clone new repository
+        # Clone new repository with appropriate authentication
         await message.answer("📥 Клонируем новый репозиторий...")
-        subprocess.run(['git', 'clone', repo_url, str(repo_path)], check=True, capture_output=True)
+        subprocess.run(['git', 'clone', repo_url_to_use, str(repo_path)], check=True, capture_output=True)
         
-        # Configure Git credentials for the new repository
+        # Configure Git credentials and VCS-specific settings
         await message.answer("🔐 Настраиваем Git credentials...")
         configure_git_credentials(str(repo_path), user_id)
         
-        # Update user data
-        user_repos = load_user_repos()
-        # Find user entry and update repo_url
-        for key, repo_info in user_repos.items():
-            if str(repo_info.get('telegram_id')) == str(user_id):
-                user_repos[key]['repo_url'] = repo_url
-                break
+        # Configure VCS-specific settings
+        if repo_type == REPO_TYPES['GITLAB']:
+            # Configure GitLab LFS
+            lfs_manager = GitLabLFSManager()
+            lfs_manager.configure_gitlab_lfs(str(repo_path), repo_url)
+            
+            # Update user data with SSH key info
+            user_repos = load_user_repos()
+            for key, repo_info in user_repos.items():
+                if str(repo_info.get('telegram_id')) == str(user_id):
+                    user_repos[key]['repo_url'] = repo_url
+                    user_repos[key]['repo_type'] = REPO_TYPES['GITLAB']
+                    user_repos[key]['ssh_private_key_path'] = ssh_setup_result.get('private_key_path')
+                    user_repos[key]['gitlab_host'] = ssh_setup_result.get('gitlab_host')
+                    break
+            save_user_repos(user_repos)
+        else:
+            # Update user data for GitHub/other repositories
+            user_repos = load_user_repos()
+            for key, repo_info in user_repos.items():
+                if str(repo_info.get('telegram_id')) == str(user_id):
+                    user_repos[key]['repo_url'] = repo_url
+                    user_repos[key]['repo_type'] = repo_type
+                    break
+            save_user_repos(user_repos)
         
-        save_user_repos(user_repos)
-        
-        # Update session to collect GitHub credentials BEFORE clearing
+        # Update session to collect credentials
         user_sessions = globals().get('user_edit_sessions', {})
         user_sessions[user_id]['collect_git_username'] = True
         user_sessions[user_id]['repo_url'] = repo_url  # Store repo URL for later use
+        user_sessions[user_id]['repo_type'] = repo_type  # Store repository type
         globals()['user_edit_sessions'] = user_sessions
         
-        await message.answer(
-            f"✅ Репозиторий клонирован!\n"
-            f"URL: {repo_url}\n"
-            f"Путь: {repo_path}\n\n"
-            f"🔧 Теперь введите ваш GitHub username (без @):"
-        )
+        # Different messages based on repository type
+        if repo_type == REPO_TYPES['GITLAB']:
+            await message.answer(
+                f"✅ Репозиторий клонирован через SSH!\n"
+                f"URL: {repo_url}\n"
+                f"Путь: {repo_path}\n\n"
+                f"🔧 Теперь введите ваш GitLab username (без @):"
+            )
+        else:
+            await message.answer(
+                f"✅ Репозиторий клонирован!\n"
+                f"URL: {repo_url}\n"
+                f"Путь: {repo_path}\n\n"
+                f"🔧 Теперь введите ваш GitHub username (без @):"
+            )
         
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr.decode() if e.stderr else str(e)
