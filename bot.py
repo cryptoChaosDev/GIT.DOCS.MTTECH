@@ -1550,10 +1550,15 @@ def _clear_action(user_id):
 
 
 def get_lfs_lock_info(doc_rel_path: str, cwd: Path = REPO_PATH, repo_type: str = None):
-    """Return lock info for a path according to `git lfs locks` output or None. cwd specifies repository root."""
+    """Return lock info for a path using modern GitLab API or git lfs locks as fallback. cwd specifies repository root."""
     try:
-        # Simple call - credentials are stored per repository
-        proc = subprocess.run(["git", "lfs", "locks"], cwd=str(cwd), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        # Try to get lock info using git lfs locks first (may show deprecation warning but still works)
+        proc = subprocess.run(["git", "lfs", "locks"], cwd=str(cwd), capture_output=True, text=True, encoding='utf-8', errors='replace')
+        
+        # Log deprecation warning if present
+        if proc.stderr and "deprecated" in proc.stderr.lower():
+            logging.warning(f"Git LFS locks API deprecation warning: {proc.stderr.strip()}")
+            
         out = proc.stdout or ""
         # Parse Git LFS locks output format: "path    owner    timestamp"
         for line in out.splitlines():
@@ -1572,8 +1577,150 @@ def get_lfs_lock_info(doc_rel_path: str, cwd: Path = REPO_PATH, repo_type: str =
                 else:
                     # Fallback to raw parsing
                     return {"raw": line.strip()}
-    except subprocess.CalledProcessError:
-        return None
+    except subprocess.CalledProcessError as e:
+        logging.warning(f"Failed to get LFS lock info via git command: {e}")
+        
+    # Fallback: try to get lock status through GitLab API if it's a GitLab repo
+    if repo_type == REPO_TYPES['GITLAB']:
+        try:
+            # Try to get user_id from context
+            user_id = None
+            import inspect
+            frame = inspect.currentframe()
+            try:
+                # Walk up call stack to find message context
+                caller_frame = frame.f_back
+                while caller_frame:
+                    if 'message' in caller_frame.f_locals:
+                        message = caller_frame.f_locals['message']
+                        if hasattr(message, 'from_user') and hasattr(message.from_user, 'id'):
+                            user_id = message.from_user.id
+                            break
+                    caller_frame = caller_frame.f_back
+            finally:
+                del frame
+            
+            return get_lock_info_via_gitlab_api(doc_rel_path, cwd, user_id)
+        except Exception as e:
+            logging.warning(f"Failed to get lock info via GitLab API: {e}")
+    
+    return None
+
+def get_current_user_context():
+    """Get current user context from active session or message"""
+    # This is a placeholder - in practice, you'd get this from the current message context
+    # For now, we'll use a global approach or pass user_id as parameter
+    import inspect
+    frame = inspect.currentframe()
+    try:
+        # Walk up the call stack to find message context
+        while frame:
+            if 'message' in frame.f_locals:
+                message = frame.f_locals['message']
+                if hasattr(message, 'from_user') and hasattr(message.from_user, 'id'):
+                    return message.from_user.id
+            frame = frame.f_back
+    finally:
+        del frame
+    return None
+
+def get_lock_info_via_gitlab_api(doc_rel_path: str, cwd: Path = REPO_PATH, user_id: int = None):
+    """Get lock information via GitLab's /users/locks/activity API endpoint"""
+    try:
+        # Get user_id from parameter or context
+        if not user_id:
+            user_id = get_current_user_context()
+        
+        if not user_id:
+            logging.warning("No user context available for GitLab API call")
+            return None
+        
+        # Get repository URL to determine GitLab instance
+        remote_result = subprocess.run(["git", "remote", "get-url", "origin"], 
+                                     cwd=str(cwd), capture_output=True, text=True)
+        if remote_result.returncode != 0:
+            return None
+            
+        repo_url = remote_result.stdout.strip()
+        
+        # Extract GitLab host and project info
+        if repo_url.startswith('https://'):
+            # https://gitlab.example.com/group/project.git
+            host_and_path = repo_url.replace('https://', '').replace('.git', '')
+            parts = host_and_path.split('/', 2)
+            if len(parts) >= 3:
+                gitlab_host = parts[0]
+                project_path = f"{parts[1]}/{parts[2]}"
+            else:
+                return None
+        elif repo_url.startswith('git@'):
+            # git@gitlab.example.com:group/project.git
+            host_and_path = repo_url.split(':', 1)[1].replace('.git', '')
+            gitlab_host = repo_url.split('@')[1].split(':')[0]
+            project_path = host_and_path
+        else:
+            return None
+            
+        # Look for GitLab credentials
+        gitlab_token = None
+        credential_files = [
+            Path("/app/data") / f".git-credentials-gitlab-{user_id}",
+            Path("/app/data") / f".git-credentials-lfs-{user_id}"
+        ]
+        
+        for cred_file in credential_files:
+            if cred_file.exists():
+                try:
+                    content = cred_file.read_text().strip()
+                    if 'oauth2:' in content:
+                        gitlab_token = content.split('oauth2:')[1].split('@')[0]
+                        break
+                except Exception:
+                    continue
+        
+        if not gitlab_token:
+            # Try to get from git config
+            try:
+                config_result = subprocess.run(["git", "config", "lfs.gitlabToken"], 
+                                             cwd=str(cwd), capture_output=True, text=True)
+                if config_result.returncode == 0:
+                    gitlab_token = config_result.stdout.strip()
+            except Exception:
+                pass
+        
+        if not gitlab_token:
+            logging.warning("No GitLab token found for API access")
+            return None
+        
+        # Make API request to /users/locks/activity
+        import requests
+        api_url = f"https://{gitlab_host}/api/v4/projects/{project_path.replace('/', '%2F')}/users/locks/activity"
+        
+        headers = {
+            'Authorization': f'Bearer {gitlab_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.get(api_url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            locks_data = response.json()
+            
+            # Find lock for our specific file
+            for lock in locks_data:
+                if lock.get('path') == doc_rel_path:
+                    return {
+                        "path": lock.get('path'),
+                        "owner": lock.get('user', {}).get('username', 'unknown'),
+                        "id": lock.get('id'),
+                        "created_at": lock.get('created_at')
+                    }
+        else:
+            logging.warning(f"GitLab API request failed: {response.status_code} - {response.text}")
+            
+    except Exception as e:
+        logging.warning(f"Error getting lock info via GitLab API: {e}")
+    
     return None
 
 class GitLabLFSManager:
@@ -3464,26 +3611,59 @@ async def check_lock_status(message):
         await message.answer("❌ Только администраторы могут просматривать статус всех блокировок.", reply_markup=get_main_keyboard(user_id=message.from_user.id))
         return
         
-    # Use git-lfs to show authoritative lock status when possible
+    # Try to get lock status using modern approach
     try:
         repo_root = await require_user_repo(message)
         if not repo_root:
             return
-        # Get LFS locks - credentials stored globally
-        proc = subprocess.run(["git", "lfs", "locks"], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+            
+        # First try git-lfs locks (may show deprecation warning)
+        proc = subprocess.run(["git", "lfs", "locks"], cwd=str(repo_root), capture_output=True, text=True, encoding='utf-8', errors='replace')
+        
+        # Log deprecation warning if present
+        if proc.stderr and "deprecated" in proc.stderr.lower():
+            logging.info(f"Git LFS API deprecation notice: {proc.stderr.strip()}")
+        
         out = (proc.stdout or "").strip()
         if not out:
-            await message.answer("🔓 Нет активных блокировок (git-lfs)", reply_markup=get_locks_keyboard(user_id=message.from_user.id))
+            await message.answer("🔓 Нет активных блокировок", reply_markup=get_locks_keyboard(user_id=message.from_user.id))
             return
-        await message.answer(f"🔒 Активные блокировки (git-lfs):\n{out}", reply_markup=get_locks_keyboard(user_id=message.from_user.id))
+            
+        # Format the output nicely
+        formatted_output = ""
+        for line in out.splitlines():
+            if line.strip():
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    path = parts[0]
+                    owner = parts[1]
+                    timestamp = parts[2] if len(parts) > 2 else ""
+                    formatted_output += f"📄 {path}\n   👤 {owner}\n   🕐 {timestamp}\n\n"
+                else:
+                    formatted_output += f"{line}\n"
+        
+        await message.answer(f"🔒 Активные блокировки:\n\n{formatted_output}", reply_markup=get_locks_keyboard(user_id=message.from_user.id))
         
         # Log lock status check
         user_name = format_user_name(message)
         timestamp = format_datetime()
-        log_message = f"🔒 Администратор {user_name} проверил статус всех блокировок (git-lfs) [{timestamp}]"
+        log_message = f"🔒 Администратор {user_name} проверил статус всех блокировок [{timestamp}]"
         await log_to_group(message, log_message)
+        
     except subprocess.CalledProcessError as e:
-        await message.answer(f"❌ Ошибка получения статуса блокировок: {str(e)[:200]}", reply_markup=get_locks_keyboard(user_id=message.from_user.id))
+        error_msg = str(e)
+        if e.stderr:
+            error_msg = e.stderr.decode('utf-8', errors='replace') if isinstance(e.stderr, bytes) else str(e.stderr)
+        
+        # If it's the deprecation error, provide helpful message
+        if "deprecated" in error_msg.lower() or "endpoint" in error_msg.lower():
+            await message.answer(
+                "⚠️ API блокировок устарел. Статус блокировок может отображаться некорректно.\n"
+                "Для получения актуальной информации обратитесь к администратору GitLab.", 
+                reply_markup=get_locks_keyboard(user_id=message.from_user.id)
+            )
+        else:
+            await message.answer(f"❌ Ошибка получения статуса блокировок: {error_msg[:200]}", reply_markup=get_locks_keyboard(user_id=message.from_user.id))
 
 
 async def update_repository(message):
