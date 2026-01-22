@@ -2298,11 +2298,15 @@ async def list_documents(message):
         # If pull fails, continue anyway as there might be local files
         pass
 
-    docs_dir = repo_root / "docs"
-    if not docs_dir.exists():
-        docs_dir.mkdir(parents=True, exist_ok=True)
+    # Search for .docx files in the entire repository, not just /docs directory
+    docs = list(repo_root.rglob("*.docx"))
     
-    docs = list(docs_dir.rglob("*.docx"))
+    # Filter out files in .git directory and other hidden/system directories
+    docs = [doc for doc in docs 
+            if not any(part.startswith('.') for part in doc.parts) 
+            and '.git' not in doc.parts
+            and '__pycache__' not in doc.parts
+            and 'node_modules' not in doc.parts]
     if not docs:
         await message.answer("📂 В репозитории нет документов .docx", reply_markup=get_main_keyboard(message.from_user.id))
         return
@@ -4144,12 +4148,15 @@ async def handle_repo_action_simple(msg, action):
     # Save user repo mapping
     set_user_repo(user_id, str(repo_dir), repo_url=repo_url, username=username)
 
-    # List documents
-    docs_dir = repo_dir / "docs"
-    if not docs_dir.exists():
-        docs_dir.mkdir(parents=True, exist_ok=True)
-
-    docs = list(docs_dir.rglob("*.docx"))
+    # List documents - search entire repository for .docx files
+    docs = list(repo_dir.rglob("*.docx"))
+    
+    # Filter out files in .git directory and other hidden/system directories
+    docs = [doc for doc in docs 
+            if not any(part.startswith('.') for part in doc.parts) 
+            and '.git' not in doc.parts
+            and '__pycache__' not in doc.parts
+            and 'node_modules' not in doc.parts]
     if docs:
         await list_documents(msg)
 
