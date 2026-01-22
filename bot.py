@@ -4446,6 +4446,31 @@ async def main():
                     await msg.answer("❌ Неверный формат URL. Используйте: https://github.com/username/repository")
                 return
             
+            # Handle SSH key confirmation for GitLab
+            if session and session.get('waiting_for_ssh_confirmation'):
+                if text == "✅ Я установил ключ в репозитории":
+                    # Proceed with repository setup using SSH
+                    repo_url = session['repo_url']
+                    ssh_setup_result = session['ssh_setup_result']
+                    user_id = session['user_id']
+                    
+                    # Clear session
+                    user_sessions = globals().get('user_edit_sessions', {})
+                    del user_sessions[msg.from_user.id]
+                    globals()['user_edit_sessions'] = user_sessions
+                    
+                    # Continue with repository setup
+                    await continue_gitlab_setup_after_ssh(msg, user_id, repo_url, ssh_setup_result)
+                    return
+                elif text == "❌ Отмена":
+                    # Cancel setup
+                    user_sessions = globals().get('user_edit_sessions', {})
+                    del user_sessions[msg.from_user.id]
+                    globals()['user_edit_sessions'] = user_sessions
+                    
+                    await msg.answer("❌ Настройка репозитория отменена.", reply_markup=get_main_keyboard(msg.from_user.id))
+                    return
+            
             # Handle full repository setup mode (deprecated - removed for security reasons)
             if session and session.get('setup_repo_mode'):
                 await msg.answer("❌ Эта функция больше недоступна. Пользователь должен настраивать свой репозиторий самостоятельно.")
@@ -4772,13 +4797,33 @@ async def perform_user_repo_setup(message, session, repo_url):
             # Send SSH setup instructions to user
             await message.answer(ssh_setup_result['instructions'])
             
-            # Use SSH URL for cloning
-            ssh_url = convert_https_to_ssh(repo_url)
-            repo_url_to_use = ssh_url
+            # Store SSH info in session and wait for user confirmation
+            user_sessions = globals().get('user_edit_sessions', {})
+            user_sessions[user_id] = {
+                'user_id': user_id,
+                'repo_url': repo_url,
+                'repo_type': repo_type,
+                'ssh_setup_result': ssh_setup_result,
+                'waiting_for_ssh_confirmation': True
+            }
+            globals()['user_edit_sessions'] = user_sessions
             
-            # Configure SSH for this operation
-            configure_ssh_for_git_operation(ssh_setup_result['private_key_path'])
+            # Send confirmation button
+            keyboard = [
+                ["✅ Я установил ключ в репозитории"],
+                ["❌ Отмена"]
+            ]
             
+            if PTB_AVAILABLE:
+                reply_markup = PTBReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+            else:
+                reply_markup = keyboard
+            
+            await message.answer(
+                "🔐 После добавления SSH ключа в ваш GitLab, нажмите кнопку ниже для продолжения настройки.",
+                reply_markup=reply_markup
+            )
+            return
         else:
             # For GitHub or unknown repositories, use HTTPS
             repo_url_to_use = repo_url
@@ -4867,6 +4912,79 @@ async def perform_user_repo_setup(message, session, repo_url):
                 f"Путь: {repo_path}\n\n"
                 f"🔧 Теперь введите ваш GitHub username (без @):"
             )
+        
+    except subprocess.CalledProcessError as e:
+        error_msg = e.stderr.decode() if e.stderr else str(e)
+        await message.answer(f"❌ Ошибка при клонировании репозитория:\n{error_msg}")
+    except Exception as e:
+        await message.answer(f"❌ Произошла ошибка:\n{str(e)}")
+
+
+async def continue_gitlab_setup_after_ssh(message, user_id, repo_url, ssh_setup_result):
+    """Continue GitLab repository setup after SSH key confirmation"""
+    try:
+        # Use SSH URL for cloning
+        ssh_url = convert_https_to_ssh(repo_url)
+        
+        # Configure SSH for this operation
+        configure_ssh_for_git_operation(ssh_setup_result['private_key_path'])
+        
+        # Check if user exists, if not - create basic user entry
+        user_repo = get_user_repo(user_id)
+        
+        if not user_repo:
+            # Create basic user entry for new user
+            await message.answer("🆕 Обнаружен новый пользователь. Создаем базовую запись...")
+            user_repo = create_basic_user_entry(user_id, message.from_user.username)
+            
+        # Get repository path
+        repo_path = Path(user_repo['repo_path'])
+        
+        # Remove old repository if exists
+        if repo_path.exists():
+            import shutil
+            shutil.rmtree(repo_path)
+            await message.answer("🗑️ Старый репозиторий удален")
+        
+        # Clone new repository with SSH authentication
+        await message.answer("📥 Клонируем новый репозиторий через SSH...")
+        subprocess.run(['git', 'clone', ssh_url, str(repo_path)], check=True, capture_output=True)
+        
+        # Configure Git credentials and VCS-specific settings
+        await message.answer("🔐 Настраиваем Git credentials...")
+        configure_git_credentials(str(repo_path), user_id)
+        
+        # Configure GitLab LFS
+        lfs_manager = GitLabLFSManager()
+        lfs_manager.configure_gitlab_lfs(str(repo_path), repo_url)
+        
+        # Update user data with SSH key info
+        user_repos = load_user_repos()
+        for key, repo_data in user_repos.items():
+            if str(repo_data.get('telegram_id')) == str(user_id):
+                user_repos[key]['repo_url'] = repo_url
+                user_repos[key]['repo_type'] = REPO_TYPES['GITLAB']
+                user_repos[key]['ssh_private_key_path'] = ssh_setup_result.get('private_key_path')
+                user_repos[key]['gitlab_host'] = ssh_setup_result.get('gitlab_host')
+                break
+        save_user_repos(user_repos)
+        
+        # Update session to collect GitLab username
+        user_sessions = globals().get('user_edit_sessions', {})
+        user_sessions[user_id] = {
+            'user_id': user_id,
+            'collect_git_username': True,
+            'repo_url': repo_url,
+            'repo_type': REPO_TYPES['GITLAB']
+        }
+        globals()['user_edit_sessions'] = user_sessions
+        
+        await message.answer(
+            f"✅ Репозиторий успешно клонирован через SSH!\n"
+            f"URL: {repo_url}\n"
+            f"Путь: {repo_path}\n\n"
+            f"🔧 Теперь введите ваш GitLab username (без @):"
+        )
         
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr.decode() if e.stderr else str(e)
