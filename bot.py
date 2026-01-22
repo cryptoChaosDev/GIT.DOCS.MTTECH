@@ -5315,12 +5315,6 @@ async def perform_user_repo_setup(message, session, repo_url):
 async def continue_gitlab_setup_after_ssh(message, user_id, repo_url, ssh_setup_result):
     """Continue GitLab repository setup after SSH key confirmation"""
     try:
-        # Use SSH URL for cloning
-        ssh_url = convert_https_to_ssh(repo_url)
-        
-        # Configure SSH for this operation
-        configure_ssh_for_git_operation(ssh_setup_result['private_key_path'], str(repo_path))
-        
         # Check if user exists, if not - create basic user entry
         user_repo = get_user_repo(user_id)
         
@@ -5331,6 +5325,12 @@ async def continue_gitlab_setup_after_ssh(message, user_id, repo_url, ssh_setup_
             
         # Get repository path
         repo_path = Path(user_repo['repo_path'])
+        
+        # Use SSH URL for cloning
+        ssh_url = convert_https_to_ssh(repo_url)
+        
+        # Configure SSH for this operation
+        configure_ssh_for_git_operation(ssh_setup_result['private_key_path'], str(repo_path))
         
         # Remove old repository if exists
         if repo_path.exists():
