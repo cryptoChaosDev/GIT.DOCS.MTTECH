@@ -595,8 +595,33 @@ def configure_gitlab_credentials(repo_path: str, gitlab_username: str, private_t
         email = f"{gitlab_username}@users.noreply.gitlab.com"
         subprocess.run(["git", "config", "user.email", email], cwd=repo_path, check=True, capture_output=True)
         
-        # Configure GitLab LFS
-        subprocess.run(["git", "config", "lfs.url", "https://gitlab.com"], cwd=repo_path, check=True, capture_output=True)
+        # Configure GitLab LFS for the specific instance
+        # Get the GitLab host from the repository remote URL
+        try:
+            remote_result = subprocess.run(["git", "remote", "get-url", "origin"], 
+                                         cwd=repo_path, capture_output=True, text=True)
+            if remote_result.returncode == 0:
+                remote_url = remote_result.stdout.strip()
+                import re
+                # Extract host from SSH or HTTPS URL
+                if remote_url.startswith('git@'):
+                    host_match = re.match(r'git@([^:]+):', remote_url)
+                else:
+                    host_match = re.match(r'https://([^/]+)/', remote_url)
+                
+                if host_match:
+                    gitlab_host = host_match.group(1)
+                    lfs_url = f"https://{gitlab_host}"
+                    subprocess.run(["git", "config", "lfs.url", lfs_url], cwd=repo_path, check=True, capture_output=True)
+                else:
+                    # Fallback to gitlab.com
+                    subprocess.run(["git", "config", "lfs.url", "https://gitlab.com"], cwd=repo_path, check=True, capture_output=True)
+            else:
+                # Fallback to gitlab.com
+                subprocess.run(["git", "config", "lfs.url", "https://gitlab.com"], cwd=repo_path, check=True, capture_output=True)
+        except Exception:
+            # Fallback to gitlab.com
+            subprocess.run(["git", "config", "lfs.url", "https://gitlab.com"], cwd=repo_path, check=True, capture_output=True)
         
         # Create personal credential file for GitLab
         if user_id:
@@ -605,8 +630,25 @@ def configure_gitlab_credentials(repo_path: str, gitlab_username: str, private_t
             cred_filename = ".git-credentials-gitlab-default"
             
         cred_file = Path("/app/data") / cred_filename
-        # GitLab credential format: https://oauth2:TOKEN@gitlab.com
-        cred_content = f"https://oauth2:{private_token}@gitlab.com\n"
+        # GitLab credential format: https://oauth2:TOKEN@host
+        # Use the same host detection logic
+        gitlab_host = "gitlab.com"  # default
+        try:
+            remote_result = subprocess.run(["git", "remote", "get-url", "origin"], 
+                                         cwd=repo_path, capture_output=True, text=True)
+            if remote_result.returncode == 0:
+                remote_url = remote_result.stdout.strip()
+                import re
+                if remote_url.startswith('git@'):
+                    host_match = re.match(r'git@([^:]+):', remote_url)
+                else:
+                    host_match = re.match(r'https://([^/]+)/', remote_url)
+                if host_match:
+                    gitlab_host = host_match.group(1)
+        except Exception:
+            pass
+            
+        cred_content = f"https://oauth2:{private_token}@{gitlab_host}\n"
         cred_file.write_text(cred_content)
         cred_file.chmod(0o600)
         
