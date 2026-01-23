@@ -9,7 +9,9 @@ services:
       - ADMIN_IDS=${ADMIN_IDS}
       - REPO_PATH=/app/repo
       - USER_REPOS_DIR=/app/user_repos
-      - LOGS_DIR=/app/logs
+      - USER_REPOS_FILE=/app/data/user_repos.json
+      - LOCKS_FILE=/app/data/locks.json
+      - LOG_DIR=/app/logs
       - AUTO_UNLOCK_ON_UPLOAD=${AUTO_UNLOCK_ON_UPLOAD:-false}
     volumes:
       - ./user_repos:/app/user_repos

@@ -3615,8 +3615,8 @@ async def lock_document_by_name(message, doc_name: str):
             # Get Telegram username for lock owner
             telegram_username = None
             for user_id, repo_data in user_repos.items():
-                if repo_info.get('git_username') == lock_owner:
-                    telegram_username = repo_info.get('telegram_username')
+                if repo_data.get('git_username') == lock_owner:
+                    telegram_username = repo_data.get('telegram_username')
                     if telegram_username and not telegram_username.startswith('@'):
                         telegram_username = f"@{telegram_username}"
                     break
