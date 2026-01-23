@@ -1653,8 +1653,10 @@ def _clear_action(user_id):
 def get_lfs_lock_info(doc_rel_path: str, cwd: Path = REPO_PATH, repo_type: str = None):
     """Return lock info for a path using modern GitLab API or git lfs locks as fallback. cwd specifies repository root."""
     try:
-        # Try to get lock info using git lfs locks first (may show deprecation warning but still works)
-        logging.info(f"Getting LFS lock info for {doc_rel_path} in repository {cwd}")
+        # Normalize path - remove leading/trailing slashes and convert backslashes
+        normalized_path = doc_rel_path.replace('\\', '/').strip('/')
+        logging.info(f"Getting LFS lock info for {normalized_path} in repository {cwd}")
+        
         proc = subprocess.run(["git", "lfs", "locks"], cwd=str(cwd), capture_output=True, text=True, encoding='utf-8', errors='replace')
         
         # Log deprecation warning if present
@@ -1664,22 +1666,26 @@ def get_lfs_lock_info(doc_rel_path: str, cwd: Path = REPO_PATH, repo_type: str =
         out = proc.stdout or ""
         # Parse Git LFS locks output format: "path    owner    timestamp"
         for line in out.splitlines():
-            if doc_rel_path in line:
+            if line.strip():
                 parts = line.strip().split()
                 if len(parts) >= 2:
-                    # First part is path, second is owner
-                    path_part = parts[0]
+                    locked_path = parts[0].replace('\\', '/').strip('/')
                     owner_part = parts[1]
-                    logging.info(f"Found lock for {doc_rel_path}: owner={owner_part}")
-                    return {
-                        "raw": line.strip(),
-                        "path": path_part,
-                        "owner": owner_part,
-                        "timestamp": parts[2] if len(parts) > 2 else None
-                    }
-                else:
-                    # Fallback to raw parsing
-                    return {"raw": line.strip()}
+                    lock_id = parts[2] if len(parts) > 2 else None
+                    
+                    # Check if this is the file we're looking for
+                    # Match both full path and just filename
+                    if (locked_path == normalized_path or 
+                        locked_path.endswith('/' + normalized_path) or
+                        normalized_path.endswith('/' + locked_path) or
+                        locked_path.split('/')[-1] == normalized_path.split('/')[-1]):
+                        logging.info(f"Found lock for {normalized_path}: owner={owner_part}, path={locked_path}")
+                        return {
+                            "raw": line.strip(),
+                            "path": locked_path,
+                            "owner": owner_part,
+                            "id": lock_id
+                        }
     except subprocess.CalledProcessError as e:
         logging.warning(f"Failed to get LFS lock info via git command: {e}")
         
@@ -2703,10 +2709,14 @@ async def list_documents(message):
                         if len(parts) >= 3:
                             path = parts[0]
                             owner = parts[1]
-                            if "/" in path:
-                                filename = path.split("/")[-1]
-                                git_lfs_locks[filename] = {"owner": owner, "id": parts[2]}
-                                logging.info(f"Found lock: {filename} locked by {owner}")
+                            lock_id = parts[2] if len(parts) > 2 else None
+                            # Store both full path and filename as keys for flexibility
+                            git_lfs_locks[path] = {"owner": owner, "id": lock_id, "path": path}
+                            # Also store by filename alone for compatibility
+                            filename = path.split("/")[-1] if "/" in path else path
+                            if filename not in git_lfs_locks:
+                                git_lfs_locks[filename] = {"owner": owner, "id": lock_id, "path": path}
+                            logging.info(f"Found lock: {path} (filename: {filename}) locked by {owner}")
     except Exception as e:
         logging.error(f"Error getting LFS locks for user {message.from_user.id}: {e}")
     
@@ -2792,9 +2802,9 @@ async def handle_doc_selection(message):
         
         # Try to find user by GitHub username in our user mapping
         for user_id, repo_data in user_repos.items():
-            if repo_info.get('git_username') == lock_owner_id:
+            if repo_data.get('git_username') == lock_owner_id:
                 # Found user with matching GitHub username, get their Telegram username
-                telegram_username = repo_info.get('telegram_username')
+                telegram_username = repo_data.get('telegram_username')
                 if telegram_username and not telegram_username.startswith('@'):
                     telegram_username = f"@{telegram_username}"
                 break
@@ -3671,8 +3681,10 @@ async def unlock_document_by_name(message, doc_name: str):
         await message.answer(f"❌ У вас нет прав для разблокировки документа {doc_name} (владелец {lfs_lock_info.get('owner', 'unknown')}).", reply_markup=get_document_keyboard(doc_name, is_locked=True, can_unlock=False))
         return
     # Try to unlock via git-lfs
-    # Use only filename to avoid protocol issues with SSH repositories
+    # Use relative path to ensure consistency with what git lfs locks returns
+    rel = str(doc_path.relative_to(repo_root)).replace('\\', '/')
     filename_only = doc_path.name
+    logging.info(f"Attempting to unlock document for user {message.from_user.id}: rel_path={rel}, filename={filename_only}")
     try:
         proc = subprocess.run(["git", "lfs", "unlock", filename_only], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
         # Return to document menu
@@ -3714,9 +3726,6 @@ async def unlock_document_by_name(message, doc_name: str):
         # Return to document menu
         reply_markup = get_document_keyboard(doc_name, is_locked=True)
         await message.answer(f"⚠️ Ошибка при разблокировке: {err[:200]}", reply_markup=reply_markup)
-        # Return to document menu
-        reply_markup = get_document_keyboard(doc_name, is_locked=True)
-        await message.answer(f"⚠️ Ошибка при попытке разблокировать через git-lfs: {err[:200]}", reply_markup=reply_markup)
 
 async def lock_document_by_name(message, doc_name: str):
     repo_root = get_repo_for_user_id(message.from_user.id)
@@ -3793,8 +3802,10 @@ async def lock_document_by_name(message, doc_name: str):
     
     # Create lock
     # Try to lock via git-lfs first (so others see it)
-    # Use only filename to avoid protocol issues with SSH repositories
+    # Use relative path to ensure consistency with what git lfs locks returns
+    rel = str(doc_path.relative_to(repo_root)).replace('\\', '/')
     filename_only = doc_path.name
+    logging.info(f"Attempting to lock document for user {message.from_user.id}: rel_path={rel}, filename={filename_only}")
     try:
         # Simple call - credentials are stored globally
         proc = subprocess.run(["git", "lfs", "lock", filename_only], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
@@ -3809,7 +3820,7 @@ async def lock_document_by_name(message, doc_name: str):
         log_message = f"🔒 Пользователь {user_name} заблокировал документ: {doc_name} [{timestamp}]"
         await log_to_group(message, log_message)
     except subprocess.CalledProcessError as e:
-        # If git-lfs locking fails, present the error and fallback to local lock
+        # If git-lfs locking fails, check if it's already locked
         err_raw = e.stderr or e.stdout or b''
         try:
             if isinstance(err_raw, (bytes, bytearray)):
@@ -3818,6 +3829,50 @@ async def lock_document_by_name(message, doc_name: str):
                 err = str(err_raw).strip()
         except Exception:
             err = str(err_raw).strip()
+        
+        # Check if error is "already locked"
+        if "already locked" in err.lower():
+            logging.info(f"Document {doc_name} is already locked: {err}")
+            # Try to get lock info to show who locked it
+            try:
+                lfs_lock_info = get_lfs_lock_info(rel, cwd=repo_root)
+                if lfs_lock_info:
+                    lock_owner = lfs_lock_info.get('owner', 'unknown')
+                    lock_timestamp = format_datetime()
+                    
+                    # Check if current user locked it
+                    user_repo = get_user_repo(message.from_user.id)
+                    current_git_username = user_repo.get('git_username') if user_repo else None
+                    can_unlock = (current_git_username == lock_owner)
+                    
+                    # Load user repos to find Telegram username
+                    user_repos = load_user_repos()
+                    
+                    # Get Telegram username for lock owner
+                    telegram_username = None
+                    for user_id, repo_data in user_repos.items():
+                        if repo_data.get('git_username') == lock_owner:
+                            telegram_username = repo_data.get('telegram_username')
+                            if telegram_username and not telegram_username.startswith('@'):
+                                telegram_username = f"@{telegram_username}"
+                            break
+                    
+                    # Format lock owner display
+                    if telegram_username:
+                        owner_display = f"[ {telegram_username} ](https://t.me/{telegram_username.lstrip('@')})"
+                    else:
+                        owner_display = lock_owner
+                    
+                    message_text = (
+                        f"❌ Документ {doc_name} уже заблокирован через Git LFS\n\n"
+                        f"👤 Владелец: {owner_display}\n"
+                        f"🕐 Время блокировки: {lock_timestamp}"
+                    )
+                    await message.answer(message_text, reply_markup=get_document_keyboard(doc_name, is_locked=True, can_unlock=can_unlock))
+                    return
+            except Exception as lock_check_error:
+                logging.warning(f"Failed to get lock info for already locked document: {lock_check_error}")
+        
         # Git LFS is required - no local fallback
         await message.answer(f"❌ Не удалось заблокировать через git-lfs: {err[:200]}.")
 
