@@ -5159,7 +5159,13 @@ async def main():
                     del user_sessions[msg.from_user.id]
                     globals()['user_edit_sessions'] = user_sessions
                     
-                    # Continue with repository setup
+                    # Hide keyboard and continue with repository setup
+                    from telegram import ReplyKeyboardRemove
+                    await msg.context.bot.send_message(
+                        chat_id=msg.chat.id,
+                        text="⏳ Начинаем настройку репозитория...",
+                        reply_markup=ReplyKeyboardRemove()
+                    )
                     await continue_gitlab_setup_after_ssh(msg, user_id, repo_url, ssh_setup_result)
                     return
                 elif text == "❌ Отмена":
@@ -5168,7 +5174,13 @@ async def main():
                     del user_sessions[msg.from_user.id]
                     globals()['user_edit_sessions'] = user_sessions
                     
-                    await msg.answer("❌ Настройка репозитория отменена.", reply_markup=get_main_keyboard(msg.from_user.id))
+                    from telegram import ReplyKeyboardRemove
+                    await msg.context.bot.send_message(
+                        chat_id=msg.chat.id,
+                        text="❌ Настройка репозитория отменена.",
+                        reply_markup=ReplyKeyboardRemove()
+                    )
+                    await msg.answer("🏠 Возвращаемся в главное меню...", reply_markup=get_main_keyboard(msg.from_user.id))
                     return
             
             # Handle full repository setup mode (deprecated - removed for security reasons)
