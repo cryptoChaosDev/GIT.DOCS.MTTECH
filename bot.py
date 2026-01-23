@@ -1664,14 +1664,20 @@ def get_lfs_lock_info(doc_rel_path: str, cwd: Path = REPO_PATH, repo_type: str =
             logging.warning(f"Git LFS locks API deprecation warning: {proc.stderr.strip()}")
             
         out = proc.stdout or ""
-        # Parse Git LFS locks output format: "path    owner    timestamp"
+        # Parse Git LFS locks output format: "path    owner    ID:id_number"
         for line in out.splitlines():
             if line.strip():
                 parts = line.strip().split()
                 if len(parts) >= 2:
                     locked_path = parts[0].replace('\\', '/').strip('/')
                     owner_part = parts[1]
-                    lock_id = parts[2] if len(parts) > 2 else None
+                    lock_id = None
+                    
+                    # Parse lock ID from "ID:6" format
+                    if len(parts) > 2:
+                        id_part = parts[2]
+                        if id_part.startswith('ID:'):
+                            lock_id = id_part[3:]  # Extract number after "ID:"
                     
                     # Check if this is the file we're looking for
                     # Match both full path and just filename
@@ -1679,7 +1685,7 @@ def get_lfs_lock_info(doc_rel_path: str, cwd: Path = REPO_PATH, repo_type: str =
                         locked_path.endswith('/' + normalized_path) or
                         normalized_path.endswith('/' + locked_path) or
                         locked_path.split('/')[-1] == normalized_path.split('/')[-1]):
-                        logging.info(f"Found lock for {normalized_path}: owner={owner_part}, path={locked_path}")
+                        logging.info(f"Found lock for {normalized_path}: owner={owner_part}, path={locked_path}, id={lock_id}")
                         return {
                             "raw": line.strip(),
                             "path": locked_path,
@@ -3700,16 +3706,25 @@ async def unlock_document_by_name(message, doc_name: str):
     if not is_allowed_to_unlock:
         await message.answer(f"❌ У вас нет прав для разблокировки документа {doc_name} (владелец {lfs_lock_info.get('owner', 'unknown')}).", reply_markup=get_document_keyboard(doc_name, is_locked=True, can_unlock=False))
         return
-    # Try to unlock via git-lfs
+    # Try to unlock via git-lfs using lock ID for better reliability
     # Use relative path to ensure consistency with what git lfs locks returns
     rel = str(doc_path.relative_to(repo_root)).replace('\\', '/')
-    logging.info(f"Attempting to unlock document for user {message.from_user.id}: rel_path={rel}")
+    logging.info(f"Attempting to unlock document for user {message.from_user.id}: rel_path={rel}, lock_id={lfs_lock_info.get('id', 'unknown')}")
     try:
-        # Use relative path instead of just filename for proper SSH support
-        proc = subprocess.run(["git", "lfs", "unlock", rel], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        # Use lock ID for unlock instead of path, since git lfs unlock requires exact match
+        # with how the lock was originally created
+        lock_id = lfs_lock_info.get('id')
+        if lock_id:
+            # Unlock using lock ID (more reliable)
+            proc = subprocess.run(["git", "lfs", "unlock", "--id", str(lock_id)], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        else:
+            # Fallback: try using just the filename (how git lfs locks stores it)
+            filename_only = doc_path.name
+            proc = subprocess.run(["git", "lfs", "unlock", filename_only], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        
         # Return to document menu
         reply_markup = get_document_keyboard(doc_name, is_locked=False)
-        await message.answer(f"🔓 Документ {doc_name} успешно разблокирован через git-lfs!\n{proc.stdout.strip()}", reply_markup=reply_markup)
+        await message.answer(f"🔓 Документ {doc_name} успешно разблокирован через git-lfs!", reply_markup=reply_markup)
         
         # Log document unlock
         user_name = format_user_name(message)
@@ -3729,11 +3744,17 @@ async def unlock_document_by_name(message, doc_name: str):
                 # Add and commit the file to clear uncommitted changes that block unlock
                 subprocess.run(["git", "add", rel], cwd=str(repo_root), check=True, capture_output=True)
                 subprocess.run(["git", "commit", "-m", f"Auto-commit for unlock {doc_name}"], cwd=str(repo_root), check=True, capture_output=True)
-                # Retry unlock
-                proc2 = subprocess.run(["git", "lfs", "unlock", filename_only], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+                # Retry unlock using lock ID or filename
+                lock_id = lfs_lock_info.get('id')
+                if lock_id:
+                    proc2 = subprocess.run(["git", "lfs", "unlock", "--id", str(lock_id)], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+                else:
+                    filename_only = doc_path.name
+                    proc2 = subprocess.run(["git", "lfs", "unlock", filename_only], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+                
                 # Return to document menu
                 reply_markup = get_document_keyboard(doc_name, is_locked=False)
-                await message.answer(f"🔓 Документ {doc_name} разблокирован после авто-коммита: {proc2.stdout.strip()}", reply_markup=reply_markup)
+                await message.answer(f"🔓 Документ {doc_name} разблокирован после авто-коммита", reply_markup=reply_markup)
                 return
             except subprocess.CalledProcessError as e2:
                 # Report error
@@ -3742,6 +3763,11 @@ async def unlock_document_by_name(message, doc_name: str):
                 reply_markup = get_document_keyboard(doc_name, is_locked=True)
                 await message.answer(f"⚠️ Ошибка при автокоммите/разблокировке: {err2[:200]}", reply_markup=reply_markup)
                 return
+        # Check for SSH authentication errors
+        if 'exit status 255' in err or 'Permission denied' in err or 'ssh' in err.lower():
+            logging.warning(f"SSH error during unlock: {err[:200]}")
+            await message.answer(f"⚠️ Ошибка SSH: не удалось подключиться к серверу Git LFS. Проверьте SSH ключи и доступ в сети.", reply_markup=get_document_keyboard(doc_name, is_locked=True))
+            return
         # Other errors: report error
         # Return to document menu
         reply_markup = get_document_keyboard(doc_name, is_locked=True)
