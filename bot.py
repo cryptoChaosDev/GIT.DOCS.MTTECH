@@ -1944,6 +1944,20 @@ class GitLabLFSManager:
                     # Use SSH protocol for LFS - avoids HTTPS auth issues
                     ssh_lfs_url = f"ssh://git@{gitlab_host}/{project_path}.git"
                     subprocess.run(["git", "config", "lfs.url", ssh_lfs_url], cwd=str(repo_path), check=True, capture_output=True)
+                    
+                    # Configure SSH command for Git LFS to use the correct SSH key
+                    # Extract user_id from repo_path if possible
+                    try:
+                        user_id_match = re.search(r'/user_repos/(\d+)/?', repo_path)
+                        if user_id_match:
+                            user_id = user_id_match.group(1)
+                            ssh_key_path = f"/app/data/ssh_keys/{user_id}/id_ed25519"
+                            subprocess.run(["git", "config", "core.sshCommand", f"ssh -i {ssh_key_path} -o StrictHostKeyChecking=no"], 
+                                          cwd=str(repo_path), capture_output=True)
+                            logging.info(f"Configured SSH key for Git LFS: {ssh_key_path}")
+                    except Exception as ssh_config_error:
+                        logging.warning(f"Failed to configure SSH key for LFS: {ssh_config_error}")
+                    
                     logging.info(f"Configured LFS URL for SSH repository: {ssh_lfs_url}")
                 else:
                     logging.warning(f"Could not parse SSH URL: {actual_remote_url}")
@@ -2702,7 +2716,13 @@ async def list_documents(message):
             proc = subprocess.run(["git", "lfs", "locks"], cwd=str(user_repo_path), capture_output=True, text=True, encoding='utf-8', errors='replace')
             logging.info(f"LFS locks command result for user {message.from_user.id}: returncode={proc.returncode}, stdout={proc.stdout[:200]}, stderr={proc.stderr[:200] if proc.stderr else 'none'}")
             
-            if proc.returncode == 0:
+            # If locks command fails, log it but continue (may be SSH auth issue)
+            if proc.returncode != 0:
+                logging.warning(f"Failed to get LFS locks for user {message.from_user.id}: {proc.stderr[:500]}")
+                # Don't fail completely - just proceed without lock info
+                proc.stdout = ""
+            
+            if proc.returncode == 0 and proc.stdout.strip():
                 for line in proc.stdout.splitlines():
                     if line.strip():
                         parts = line.strip().split()
@@ -3683,10 +3703,10 @@ async def unlock_document_by_name(message, doc_name: str):
     # Try to unlock via git-lfs
     # Use relative path to ensure consistency with what git lfs locks returns
     rel = str(doc_path.relative_to(repo_root)).replace('\\', '/')
-    filename_only = doc_path.name
-    logging.info(f"Attempting to unlock document for user {message.from_user.id}: rel_path={rel}, filename={filename_only}")
+    logging.info(f"Attempting to unlock document for user {message.from_user.id}: rel_path={rel}")
     try:
-        proc = subprocess.run(["git", "lfs", "unlock", filename_only], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        # Use relative path instead of just filename for proper SSH support
+        proc = subprocess.run(["git", "lfs", "unlock", rel], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
         # Return to document menu
         reply_markup = get_document_keyboard(doc_name, is_locked=False)
         await message.answer(f"🔓 Документ {doc_name} успешно разблокирован через git-lfs!\n{proc.stdout.strip()}", reply_markup=reply_markup)
@@ -3804,11 +3824,10 @@ async def lock_document_by_name(message, doc_name: str):
     # Try to lock via git-lfs first (so others see it)
     # Use relative path to ensure consistency with what git lfs locks returns
     rel = str(doc_path.relative_to(repo_root)).replace('\\', '/')
-    filename_only = doc_path.name
-    logging.info(f"Attempting to lock document for user {message.from_user.id}: rel_path={rel}, filename={filename_only}")
+    logging.info(f"Attempting to lock document for user {message.from_user.id}: rel_path={rel}")
     try:
-        # Simple call - credentials are stored globally
-        proc = subprocess.run(["git", "lfs", "lock", filename_only], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        # Use relative path instead of just filename for proper SSH support
+        proc = subprocess.run(["git", "lfs", "lock", rel], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
         # Git LFS lock created successfully - no local lock needed
         # Return to document menu
         reply_markup = get_document_keyboard(doc_name, is_locked=True, can_unlock=True)
@@ -3829,6 +3848,8 @@ async def lock_document_by_name(message, doc_name: str):
                 err = str(err_raw).strip()
         except Exception:
             err = str(err_raw).strip()
+        
+        logging.warning(f"Failed to lock document {doc_name}: {err}")
         
         # Check if error is "already locked"
         if "already locked" in err.lower():
@@ -3872,6 +3893,15 @@ async def lock_document_by_name(message, doc_name: str):
                     return
             except Exception as lock_check_error:
                 logging.warning(f"Failed to get lock info for already locked document: {lock_check_error}")
+        
+        # Check if it's an SSH authentication error
+        if "exit status 255" in err or "ssh" in err.lower():
+            await message.answer(
+                f"⚠️ Ошибка SSH аутентификации при блокировке документа: {err[:200]}\n\n"
+                f"Это может быть временной проблемой с подключением. Попробуйте позже.",
+                reply_markup=get_document_keyboard(doc_name, is_locked=False)
+            )
+            return
         
         # Git LFS is required - no local fallback
         await message.answer(f"❌ Не удалось заблокировать через git-lfs: {err[:200]}.")
