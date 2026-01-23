@@ -1654,6 +1654,7 @@ def get_lfs_lock_info(doc_rel_path: str, cwd: Path = REPO_PATH, repo_type: str =
     """Return lock info for a path using modern GitLab API or git lfs locks as fallback. cwd specifies repository root."""
     try:
         # Try to get lock info using git lfs locks first (may show deprecation warning but still works)
+        logging.info(f"Getting LFS lock info for {doc_rel_path} in repository {cwd}")
         proc = subprocess.run(["git", "lfs", "locks"], cwd=str(cwd), capture_output=True, text=True, encoding='utf-8', errors='replace')
         
         # Log deprecation warning if present
@@ -1669,6 +1670,7 @@ def get_lfs_lock_info(doc_rel_path: str, cwd: Path = REPO_PATH, repo_type: str =
                     # First part is path, second is owner
                     path_part = parts[0]
                     owner_part = parts[1]
+                    logging.info(f"Found lock for {doc_rel_path}: owner={owner_part}")
                     return {
                         "raw": line.strip(),
                         "path": path_part,
@@ -1909,15 +1911,27 @@ class GitLabLFSManager:
             # Initialize Git LFS
             subprocess.run(["git", "lfs", "install"], cwd=str(repo_path), check=True, capture_output=True)
             
-            # Log the URL for debugging
-            logging.info(f"Configuring Git LFS for repository URL: {repo_url}")
+            # CRITICAL: Get the actual remote URL from the repository, not the stored one
+            # The stored repo_url may be outdated or in wrong format
+            actual_remote_url = None
+            try:
+                result = subprocess.run(["git", "remote", "get-url", "origin"], 
+                                      cwd=str(repo_path), capture_output=True, text=True, check=True)
+                actual_remote_url = result.stdout.strip()
+                logging.info(f"Read actual remote URL from repository: {actual_remote_url}")
+            except Exception as e:
+                logging.warning(f"Could not read actual remote URL, falling back to stored URL: {e}")
+                actual_remote_url = repo_url
+            
+            # Use actual remote URL for LFS configuration
+            logging.info(f"Configuring Git LFS for repository URL: {actual_remote_url}")
             
             # For self-hosted GitLab, configure LFS properly based on repo URL type
-            if repo_url.startswith('git@'):
+            if actual_remote_url.startswith('git@'):
                 # SSH: For SSH repos, use SSH for LFS too to avoid authentication issues
                 # git@gitlab.example.com:group/project.git -> ssh://git@gitlab.example.com/group/project.git
                 import re
-                ssh_match = re.match(r'git@([^:]+):(.+?)(?:\.git)?/?$', repo_url)
+                ssh_match = re.match(r'git@([^:]+):(.+?)(?:\.git)?/?$', actual_remote_url)
                 if ssh_match:
                     gitlab_host = ssh_match.group(1)
                     project_path = ssh_match.group(2)
@@ -1926,13 +1940,13 @@ class GitLabLFSManager:
                     subprocess.run(["git", "config", "lfs.url", ssh_lfs_url], cwd=str(repo_path), check=True, capture_output=True)
                     logging.info(f"Configured LFS URL for SSH repository: {ssh_lfs_url}")
                 else:
-                    logging.warning(f"Could not parse SSH URL: {repo_url}")
+                    logging.warning(f"Could not parse SSH URL: {actual_remote_url}")
                     return False
                     
-            elif repo_url.startswith('https://'):
+            elif actual_remote_url.startswith('https://'):
                 # HTTPS: Use HTTPS for LFS and ensure credential helper is configured
                 import re
-                https_match = re.match(r'https://([^/]+)/(.+?)(?:\.git)?/?$', repo_url)
+                https_match = re.match(r'https://([^/]+)/(.+?)(?:\.git)?/?$', actual_remote_url)
                 if https_match:
                     gitlab_host = https_match.group(1)
                     project_path = https_match.group(2)
@@ -1945,10 +1959,10 @@ class GitLabLFSManager:
                     
                     logging.info(f"Configured LFS URL for HTTPS repository: {https_lfs_url}")
                 else:
-                    logging.warning(f"Could not parse HTTPS URL: {repo_url}")
+                    logging.warning(f"Could not parse HTTPS URL: {actual_remote_url}")
                     return False
             else:
-                logging.warning(f"Unsupported repository URL format: {repo_url}")
+                logging.warning(f"Unsupported repository URL format: {actual_remote_url}")
                 return False
             
             logging.info(f"GitLab LFS configured for repository: {repo_path}")
@@ -2657,6 +2671,7 @@ async def list_documents(message):
             logging.info(f"User {message.from_user.id} checking locks for repo: {repo_url} at {user_repo_path}")
             
             # Check remote repository URL to ensure all users use the same repo
+            remote_url = None
             try:
                 remote_result = subprocess.run(["git", "remote", "get-url", "origin"], cwd=str(user_repo_path), capture_output=True, text=True, encoding='utf-8', errors='replace')
                 if remote_result.returncode == 0:
@@ -2666,6 +2681,16 @@ async def list_documents(message):
                     logging.warning(f"User {message.from_user.id} failed to get remote URL: {remote_result.stderr}")
             except Exception as e:
                 logging.error(f"Error checking remote URL for user {message.from_user.id}: {e}")
+            
+            # CRITICAL: Reconfigure Git LFS before attempting to get locks
+            # This ensures LFS is properly configured with the correct protocol URL
+            if remote_url:
+                try:
+                    lfs_manager = GitLabLFSManager()
+                    lfs_manager.configure_gitlab_lfs(str(user_repo_path), remote_url)
+                    logging.info(f"Reconfigured LFS for user {message.from_user.id} before getting locks")
+                except Exception as e:
+                    logging.error(f"Failed to reconfigure LFS for user {message.from_user.id}: {e}")
             
             # Get LFS locks - credentials stored globally
             proc = subprocess.run(["git", "lfs", "locks"], cwd=str(user_repo_path), capture_output=True, text=True, encoding='utf-8', errors='replace')
