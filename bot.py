@@ -1869,28 +1869,38 @@ class GitLabLFSManager:
             # Initialize Git LFS
             subprocess.run(["git", "lfs", "install"], cwd=str(repo_path), check=True, capture_output=True)
             
-            # Extract GitLab host from repository URL
-            gitlab_host = None
+            # For self-hosted GitLab, configure LFS properly based on repo URL type
             if repo_url.startswith('git@'):
-                # SSH: git@gitlab.example.com:group/project.git -> gitlab.example.com
+                # SSH: For SSH repos, use SSH for LFS too to avoid authentication issues
+                # git@gitlab.example.com:group/project.git -> ssh://git@gitlab.example.com/group/project.git
                 import re
-                ssh_match = re.match(r'git@([^:]+):(.+)', repo_url)
+                ssh_match = re.match(r'git@([^:]+):(.+?)(?:\.git)?/?$', repo_url)
                 if ssh_match:
                     gitlab_host = ssh_match.group(1)
+                    project_path = ssh_match.group(2)
+                    # Use SSH protocol for LFS - avoids HTTPS auth issues
+                    ssh_lfs_url = f"ssh://git@{gitlab_host}/{project_path}.git"
+                    subprocess.run(["git", "config", "lfs.url", ssh_lfs_url], cwd=str(repo_path), check=True, capture_output=True)
+                    logging.info(f"Configured LFS URL for SSH repository: {ssh_lfs_url}")
+                else:
+                    logging.warning(f"Could not parse SSH URL: {repo_url}")
+                    return False
+                    
             elif repo_url.startswith('https://'):
-                # HTTPS: https://gitlab.example.com/group/project.git -> gitlab.example.com
+                # HTTPS: Use HTTPS for LFS
                 import re
-                https_match = re.match(r'https://([^/]+)/', repo_url)
+                https_match = re.match(r'https://([^/]+)/(.+?)(?:\.git)?/?$', repo_url)
                 if https_match:
                     gitlab_host = https_match.group(1)
-            
-            # Configure LFS URL with correct host
-            if gitlab_host:
-                https_lfs_url = f"https://{gitlab_host}"
-                subprocess.run(["git", "config", "lfs.url", https_lfs_url], cwd=str(repo_path), check=True, capture_output=True)
-                logging.info(f"Configured LFS URL for repository: {https_lfs_url}")
+                    project_path = https_match.group(2)
+                    https_lfs_url = f"https://{gitlab_host}/{project_path}.git"
+                    subprocess.run(["git", "config", "lfs.url", https_lfs_url], cwd=str(repo_path), check=True, capture_output=True)
+                    logging.info(f"Configured LFS URL for HTTPS repository: {https_lfs_url}")
+                else:
+                    logging.warning(f"Could not parse HTTPS URL: {repo_url}")
+                    return False
             else:
-                logging.warning(f"Could not extract GitLab host from URL: {repo_url}")
+                logging.warning(f"Unsupported repository URL format: {repo_url}")
                 return False
             
             logging.info(f"GitLab LFS configured for repository: {repo_path}")
@@ -1945,36 +1955,47 @@ def initialize_gitlab_lfs(repo_path: str, repo_url: str, private_token: str) -> 
         # Initialize Git LFS
         subprocess.run(["git", "lfs", "install"], cwd=str(repo_path), check=True, capture_output=True)
         
-        # Extract GitLab host from repository URL
+        # For self-hosted GitLab, configure LFS properly based on repo URL type
         import re
-        gitlab_host = "gitlab.com"  # default fallback
         
         if repo_url.startswith('git@'):
-            # SSH: git@gitlab.example.com:group/project.git
-            ssh_match = re.match(r'git@([^:]+):', repo_url)
+            # SSH: Use SSH for LFS too to avoid authentication issues
+            ssh_match = re.match(r'git@([^:]+):(.+?)(?:\.git)?/?$', repo_url)
             if ssh_match:
                 gitlab_host = ssh_match.group(1)
+                project_path = ssh_match.group(2)
+                ssh_lfs_url = f"ssh://git@{gitlab_host}/{project_path}.git"
+                subprocess.run(["git", "config", "lfs.url", ssh_lfs_url], cwd=str(repo_path), check=True, capture_output=True)
+                logging.info(f"GitLab LFS initialized with SSH URL for {repo_path}: {ssh_lfs_url}")
+                return True
+                
         elif repo_url.startswith('https://'):
-            # HTTPS: https://gitlab.example.com/group/project.git
-            https_match = re.match(r'https://([^/]+)/', repo_url)
+            # HTTPS: Use HTTPS for LFS with proper credentials
+            https_match = re.match(r'https://([^/]+)/(.+?)(?:\.git)?/?$', repo_url)
             if https_match:
                 gitlab_host = https_match.group(1)
+                project_path = https_match.group(2)
+                https_lfs_url = f"https://{gitlab_host}/{project_path}.git"
+                subprocess.run(["git", "config", "lfs.url", https_lfs_url], cwd=str(repo_path), check=True, capture_output=True)
+                
+                # Set up credentials for LFS operations
+                cred_content = f"https://oauth2:{private_token}@{gitlab_host}\n"
+                cred_file = Path("/app/data") / f".git-credentials-lfs-{os.path.basename(repo_path)}"
+                cred_file.write_text(cred_content)
+                cred_file.chmod(0o600)
+                
+                subprocess.run(["git", "config", "credential.helper", f"store --file={cred_file}"], 
+                              cwd=str(repo_path), check=True, capture_output=True)
+                
+                logging.info(f"GitLab LFS initialized with HTTPS URL for {repo_path}: {https_lfs_url}")
+                return True
         
-        # Configure GitLab LFS settings with correct host
-        https_lfs_url = f"https://{gitlab_host}"
-        subprocess.run(["git", "config", "lfs.url", https_lfs_url], cwd=str(repo_path), check=True, capture_output=True)
+        logging.warning(f"Could not determine repository type from URL: {repo_url}")
+        return False
         
-        # Set up credentials for LFS operations
-        cred_content = f"https://oauth2:{private_token}@{gitlab_host}\n"
-        cred_file = Path("/app/data") / f".git-credentials-lfs-{os.path.basename(repo_path)}"
-        cred_file.write_text(cred_content)
-        cred_file.chmod(0o600)
-        
-        subprocess.run(["git", "config", "credential.helper", f"store --file={cred_file}"], 
-                      cwd=str(repo_path), check=True, capture_output=True)
-        
-        logging.info(f"GitLab LFS initialized for {repo_path} with host {gitlab_host}")
-        return True
+    except Exception as e:
+        logging.error(f"Failed to initialize GitLab LFS: {e}")
+        return False
         return True
         
     except Exception as e:
