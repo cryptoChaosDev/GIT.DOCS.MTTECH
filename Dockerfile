@@ -13,7 +13,8 @@ RUN apt-get update && apt-get install -y \
 # Install Git LFS
 RUN apt-get update \
     && apt-get install -y git-lfs \
-    && git lfs install
+    && git lfs install --system \
+    && git lfs version
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt .
