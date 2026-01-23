@@ -674,6 +674,46 @@ def configure_gitlab_credentials(repo_path: str, gitlab_username: str, private_t
         logging.error(f"Failed to configure GitLab credentials: {e}")
         return False
 
+def setup_gitlab_lfs_credentials(repo_path: str, repo_url: str, user_id: int = None):
+    """Setup credentials for Git LFS operations on GitLab repositories.
+    For SSH repositories, this is a no-op. For HTTPS, it configures credential helper."""
+    try:
+        # For SSH repositories, no credentials needed - skip this
+        if repo_url.startswith('git@'):
+            logging.info(f"SSH repository detected, skipping credential helper setup")
+            return True
+        
+        # For HTTPS repositories, ensure Git credentials are available
+        if repo_url.startswith('https://'):
+            import re
+            match = re.match(r'https://([^/]+)/', repo_url)
+            if not match:
+                logging.warning(f"Could not extract GitLab host from {repo_url}")
+                return False
+            
+            gitlab_host = match.group(1)
+            
+            # For Docker, credentials should be in /app/data
+            app_data_creds = Path("/app/data/.git-credentials")
+            
+            # Configure git to use this credentials file
+            subprocess.run(["git", "config", "--global", "credential.helper", f"store --file={str(app_data_creds)}"], 
+                          capture_output=True)
+            
+            # Also configure for the specific repository
+            subprocess.run(["git", "config", "credential.helper", f"store --file={str(app_data_creds)}"], 
+                          cwd=str(repo_path), capture_output=True)
+            
+            logging.info(f"Git credentials helper configured for HTTPS repository {gitlab_host}")
+            return True
+        else:
+            logging.warning(f"Unknown repository protocol for {repo_url}")
+            return True
+            
+    except Exception as e:
+        logging.error(f"Failed to setup GitLab LFS credentials: {e}")
+        return False
+
 class GitLabAuthManager:
     """Manage GitLab authentication and token validation"""
     
@@ -1869,6 +1909,9 @@ class GitLabLFSManager:
             # Initialize Git LFS
             subprocess.run(["git", "lfs", "install"], cwd=str(repo_path), check=True, capture_output=True)
             
+            # Log the URL for debugging
+            logging.info(f"Configuring Git LFS for repository URL: {repo_url}")
+            
             # For self-hosted GitLab, configure LFS properly based on repo URL type
             if repo_url.startswith('git@'):
                 # SSH: For SSH repos, use SSH for LFS too to avoid authentication issues
@@ -1887,7 +1930,7 @@ class GitLabLFSManager:
                     return False
                     
             elif repo_url.startswith('https://'):
-                # HTTPS: Use HTTPS for LFS
+                # HTTPS: Use HTTPS for LFS and ensure credential helper is configured
                 import re
                 https_match = re.match(r'https://([^/]+)/(.+?)(?:\.git)?/?$', repo_url)
                 if https_match:
@@ -1895,6 +1938,11 @@ class GitLabLFSManager:
                     project_path = https_match.group(2)
                     https_lfs_url = f"https://{gitlab_host}/{project_path}.git"
                     subprocess.run(["git", "config", "lfs.url", https_lfs_url], cwd=str(repo_path), check=True, capture_output=True)
+                    
+                    # For HTTPS, ensure credential helper is configured for LFS operations
+                    # Use store helper which reads from ~/.git-credentials or configured credential file
+                    subprocess.run(["git", "config", "credential.helper", "store"], cwd=str(repo_path), check=True, capture_output=True)
+                    
                     logging.info(f"Configured LFS URL for HTTPS repository: {https_lfs_url}")
                 else:
                     logging.warning(f"Could not parse HTTPS URL: {repo_url}")
@@ -3552,6 +3600,10 @@ async def unlock_document_by_name(message, doc_name: str):
         if user_repo:
             repo_url = user_repo.get('repo_url')
             if repo_url:
+                # For HTTPS repositories, ensure credentials are set up for LFS
+                if repo_url.startswith('https://'):
+                    setup_gitlab_lfs_credentials(str(repo_root), repo_url, message.from_user.id)
+                
                 # Re-configure LFS to ensure it's using the correct protocol-specific URL
                 lfs_manager = GitLabLFSManager()
                 lfs_manager.configure_gitlab_lfs(str(repo_root), repo_url)
@@ -3665,6 +3717,10 @@ async def lock_document_by_name(message, doc_name: str):
         if user_repo:
             repo_url = user_repo.get('repo_url')
             if repo_url:
+                # For HTTPS repositories, ensure credentials are set up for LFS
+                if repo_url.startswith('https://'):
+                    setup_gitlab_lfs_credentials(str(repo_root), repo_url, message.from_user.id)
+                
                 # Re-configure LFS to ensure it's using the correct protocol-specific URL
                 lfs_manager = GitLabLFSManager()
                 lfs_manager.configure_gitlab_lfs(str(repo_root), repo_url)
@@ -5374,6 +5430,10 @@ async def perform_user_repo_setup(message, session, repo_url):
         
         # Configure VCS-specific settings
         if repo_type == REPO_TYPES['GITLAB']:
+            # For HTTPS repositories, setup credentials for LFS
+            if repo_url.startswith('https://'):
+                setup_gitlab_lfs_credentials(str(repo_path), repo_url, user_id)
+            
             # Configure GitLab LFS (handles both SSH and HTTPS URLs properly)
             lfs_manager = GitLabLFSManager()
             lfs_manager.configure_gitlab_lfs(str(repo_path), repo_url)
