@@ -3546,6 +3546,19 @@ async def unlock_document_by_name(message, doc_name: str):
         await message.answer(f"❌ Документ {doc_name} не найден!", reply_markup=get_document_keyboard(doc_name, is_locked=False))
         return
 
+    # Ensure Git LFS is properly configured for this repository
+    try:
+        user_repo = get_user_repo(message.from_user.id)
+        if user_repo:
+            repo_url = user_repo.get('repo_url')
+            if repo_url:
+                # Re-configure LFS to ensure it's using the correct protocol-specific URL
+                lfs_manager = GitLabLFSManager()
+                lfs_manager.configure_gitlab_lfs(str(repo_root), repo_url)
+                logging.info(f"Re-configured LFS for {repo_root} with URL {repo_url}")
+    except Exception as e:
+        logging.warning(f"Failed to ensure LFS configuration: {e}")
+
     # Check if document is locked via Git LFS
     # Use relative path from repository root
     rel = str(doc_path.relative_to(repo_root)).replace('\\', '/')
@@ -3645,6 +3658,19 @@ async def lock_document_by_name(message, doc_name: str):
     if not doc_path or not doc_path.exists():
         await message.answer(f"❌ Документ {doc_name} не найден!", reply_markup=get_document_keyboard(doc_name, is_locked=False))
         return
+    
+    # Ensure Git LFS is properly configured for this repository
+    try:
+        user_repo = get_user_repo(message.from_user.id)
+        if user_repo:
+            repo_url = user_repo.get('repo_url')
+            if repo_url:
+                # Re-configure LFS to ensure it's using the correct protocol-specific URL
+                lfs_manager = GitLabLFSManager()
+                lfs_manager.configure_gitlab_lfs(str(repo_root), repo_url)
+                logging.info(f"Re-configured LFS for {repo_root} with URL {repo_url}")
+    except Exception as e:
+        logging.warning(f"Failed to ensure LFS configuration: {e}")
     
     # Check if already locked via Git LFS
     # Use relative path from repository root
@@ -4619,6 +4645,27 @@ async def main():
     # Initialize personal credentials system on startup
     initialize_persistent_credentials()
     
+    # Restore LFS configuration for all user repositories on startup
+    try:
+        user_repos = load_user_repos()
+        for composite_key, repo_data in user_repos.items():
+            try:
+                repo_path = Path(repo_data.get('repo_path', ''))
+                repo_url = repo_data.get('repo_url', '')
+                
+                if repo_path.exists() and repo_url and (repo_path / '.git').exists():
+                    # Re-configure LFS for each repository to ensure correct protocol-specific URL
+                    lfs_manager = GitLabLFSManager()
+                    result = lfs_manager.configure_gitlab_lfs(str(repo_path), repo_url)
+                    if result:
+                        logging.info(f"LFS configuration restored for {repo_path}")
+                    else:
+                        logging.warning(f"Failed to restore LFS configuration for {repo_path}")
+            except Exception as e:
+                logging.warning(f"Failed to restore LFS for repository {composite_key}: {e}")
+    except Exception as e:
+        logging.error(f"Failed to restore LFS configurations: {e}")
+    
     # Apply saved Git configurations for all users
     try:
         user_repos = load_user_repos()
@@ -5327,18 +5374,9 @@ async def perform_user_repo_setup(message, session, repo_url):
         
         # Configure VCS-specific settings
         if repo_type == REPO_TYPES['GITLAB']:
-            # Configure GitLab LFS
+            # Configure GitLab LFS (handles both SSH and HTTPS URLs properly)
             lfs_manager = GitLabLFSManager()
             lfs_manager.configure_gitlab_lfs(str(repo_path), repo_url)
-            
-            # Also configure LFS credentials for SSH repositories
-            if repo_url.startswith('git@'):
-                import re
-                ssh_match = re.match(r'git@([^:]+):(.+)', repo_url)
-                if ssh_match:
-                    gitlab_host = ssh_match.group(1)
-                    # Configure LFS URL for the specific GitLab instance
-                    subprocess.run(["git", "config", "lfs.url", f"https://{gitlab_host}"], cwd=str(repo_path), check=True, capture_output=True)
             
             # Update user data with SSH key info
             user_repos = load_user_repos()
@@ -5424,18 +5462,9 @@ async def continue_gitlab_setup_after_ssh(message, user_id, repo_url, ssh_setup_
         await message.answer("🔐 Настраиваем Git credentials...")
         configure_git_credentials(str(repo_path), user_id)
         
-        # Configure GitLab LFS
+        # Configure GitLab LFS (handles both SSH and HTTPS URLs properly)
         lfs_manager = GitLabLFSManager()
         lfs_manager.configure_gitlab_lfs(str(repo_path), repo_url)
-        
-        # Also configure LFS URL for the specific GitLab instance
-        import re
-        ssh_match = re.match(r'git@([^:]+):(.+)', repo_url)
-        if ssh_match:
-            gitlab_host = ssh_match.group(1)
-            subprocess.run(["git", "config", "lfs.url", f"https://{gitlab_host}"], cwd=str(repo_path), check=True, capture_output=True)
-            # Save Git configuration for persistence
-            save_git_config_to_user_data(user_id, str(repo_path))
         
         # Update user data with SSH key info
         user_repos = load_user_repos()
