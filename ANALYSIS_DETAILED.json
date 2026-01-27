@@ -1,0 +1,402 @@
+{
+  "project": {
+    "name": "git-docs-bot",
+    "main_file": "bot.py",
+    "file_size": {
+      "lines": 5845,
+      "chars": 250000,
+      "classes": 7,
+      "functions": 60
+    },
+    "analysis_date": "2026-01-23",
+    "analyzer": "GitHub Copilot",
+    "language": "Python 3.9+"
+  },
+  "executive_summary": {
+    "code_quality_score": 72,
+    "health_status": "GOOD_WITH_ISSUES",
+    "critical_issues": 1,
+    "high_priority_issues": 4,
+    "medium_priority_issues": 5,
+    "low_priority_issues": 4,
+    "recommended_action": "Proceed with Phase 1 (critical fixes) immediately, then Phase 2 (refactoring)",
+    "estimated_fix_hours": 18.5
+  },
+  "issues_by_severity": {
+    "critical": [
+      {
+        "id": "BUG-001",
+        "title": "Variable repo_info does not exist (should be repo_data)",
+        "file": "bot.py",
+        "line": 5648,
+        "function": "show_users_management",
+        "error_type": "NameError",
+        "impact": "Function will crash when called",
+        "fix_time_minutes": 5,
+        "fix_description": "Replace 'repo_info' with 'repo_data' in loop",
+        "test_case": "Admin clicks 'Управление пользователями' button"
+      }
+    ],
+    "high": [
+      {
+        "id": "CODE-001",
+        "title": "Duplicated document search logic",
+        "type": "code_duplication",
+        "size_bytes": 560,
+        "occurrences": 7,
+        "functions": [
+          "handle_doc_selection",
+          "download_document",
+          "upload_changes",
+          "lock_document_by_name",
+          "unlock_document_by_name",
+          "handle_doc_name_input",
+          "get_document_keyboard"
+        ],
+        "recommendation": "Create find_document() function"
+      },
+      {
+        "id": "CODE-002",
+        "title": "Duplicated LFS lock checking logic",
+        "type": "code_duplication",
+        "size_bytes": 1200,
+        "occurrences": 5,
+        "recommendation": "Create LockManager class"
+      },
+      {
+        "id": "PERF-001",
+        "title": "User repos loaded from disk on every call",
+        "type": "performance",
+        "impact": "High IO overhead",
+        "current_io_operations": "15+ per user interaction",
+        "proposed_solution": "TTL cache (60 seconds)",
+        "expected_improvement": "80-90% IO reduction"
+      },
+      {
+        "id": "PERF-002",
+        "title": "LFS locks fetched for each document in list",
+        "type": "performance",
+        "impact": "O(n) subprocess calls",
+        "current_operations": "20 subprocess calls for 20 documents",
+        "proposed_solution": "Cache all locks, update every 30 seconds",
+        "expected_improvement": "O(n) → O(1)"
+      }
+    ],
+    "medium": [
+      {
+        "id": "DEAD-001",
+        "title": "Unused function: migrate_user_repos_format()",
+        "file": "bot.py",
+        "line": 1337,
+        "action": "Delete or move to migration script"
+      },
+      {
+        "id": "DEAD-002",
+        "title": "Unused variable: AIORGRAM_AVAILABLE",
+        "file": "bot.py",
+        "line": 2077,
+        "action": "Delete"
+      },
+      {
+        "id": "DEAD-003",
+        "title": "Unused variable: dp (StubDispatcher)",
+        "file": "bot.py",
+        "line": 2091,
+        "action": "Delete"
+      },
+      {
+        "id": "ARCH-001",
+        "title": "Inconsistent global variable management",
+        "description": "Mix of direct globals, globals() dict, and class instances",
+        "recommendation": "Create SessionManager class"
+      },
+      {
+        "id": "CODE-003",
+        "title": "Duplicated admin rights checking",
+        "occurrences": 5,
+        "recommendation": "Create check_admin_rights() function"
+      }
+    ]
+  },
+  "code_metrics": {
+    "duplication_analysis": {
+      "total_duplicated_lines": 256,
+      "duplication_percentage": 4.4,
+      "top_duplicated_patterns": [
+        {
+          "pattern": "Document search logic",
+          "lines": 56,
+          "occurrences": 7,
+          "complexity": "medium"
+        },
+        {
+          "pattern": "LFS lock checking",
+          "lines": 60,
+          "occurrences": 5,
+          "complexity": "high"
+        },
+        {
+          "pattern": "Admin rights verification",
+          "lines": 20,
+          "occurrences": 5,
+          "complexity": "low"
+        }
+      ]
+    },
+    "complexity_analysis": {
+      "cyclomatic_complexity": "medium",
+      "cognitive_complexity": "medium-high",
+      "most_complex_function": "main()",
+      "most_complex_class": "GitLabAPIClient"
+    },
+    "maintainability_index": 72,
+    "test_coverage_estimated": "low (no tests found)"
+  },
+  "refactoring_recommendations": {
+    "phase_1_critical": {
+      "duration_hours": 0.5,
+      "tasks": [
+        {
+          "task": "Fix repo_info variable error",
+          "file": "bot.py",
+          "line": 5648,
+          "time_minutes": 5
+        },
+        {
+          "task": "Remove AIORGRAM_AVAILABLE variable",
+          "file": "bot.py",
+          "line": 2077,
+          "time_minutes": 5
+        },
+        {
+          "task": "Remove dp (StubDispatcher) variable",
+          "file": "bot.py",
+          "line": 2091,
+          "time_minutes": 5
+        },
+        {
+          "task": "Test and verify fixes",
+          "time_minutes": 10
+        }
+      ]
+    },
+    "phase_2_refactoring": {
+      "duration_hours": 8,
+      "tasks": [
+        {
+          "task": "Create LockManager class",
+          "new_class": "LockManager",
+          "replaces_code": "200+ lines",
+          "time_hours": 4.5,
+          "affected_functions": [
+            "handle_document_upload",
+            "lock_document_by_name",
+            "unlock_document_by_name",
+            "get_document_keyboard",
+            "download_document"
+          ]
+        },
+        {
+          "task": "Create find_document() helper function",
+          "replaces_code": "56 lines",
+          "time_hours": 1.5,
+          "affected_functions": [
+            "handle_doc_selection",
+            "download_document",
+            "upload_changes",
+            "lock_document_by_name",
+            "unlock_document_by_name",
+            "handle_doc_name_input",
+            "get_document_keyboard"
+          ]
+        },
+        {
+          "task": "Create check_admin_rights() function",
+          "replaces_code": "20 lines",
+          "time_hours": 1.5,
+          "affected_functions": [
+            "check_lock_status",
+            "force_unlock_request",
+            "fix_lfs_issues",
+            "resync_repository",
+            "commit_all_changes"
+          ]
+        },
+        {
+          "task": "Testing phase 2 changes",
+          "time_hours": 0.5
+        }
+      ]
+    },
+    "phase_3_optimization": {
+      "duration_hours": 7,
+      "tasks": [
+        {
+          "task": "Create SessionManager class",
+          "time_hours": 3.5,
+          "replaces_globals": [
+            "user_doc_sessions",
+            "user_config_state",
+            "user_config_data",
+            "user_edit_sessions"
+          ]
+        },
+        {
+          "task": "Implement UserRepoCache with TTL",
+          "time_hours": 2.5,
+          "expected_improvement": "80-90% IO reduction",
+          "cache_ttl": 60
+        },
+        {
+          "task": "Implement LfsLockCache with TTL",
+          "time_hours": 3.5,
+          "expected_improvement": "O(n) to O(1) subprocess calls",
+          "cache_ttl": 30
+        }
+      ]
+    },
+    "phase_4_finalization": {
+      "duration_hours": 3,
+      "tasks": [
+        {
+          "task": "Comprehensive testing",
+          "time_hours": 1.5
+        },
+        {
+          "task": "Documentation update",
+          "time_hours": 1
+        },
+        {
+          "task": "Code review and merge",
+          "time_hours": 0.5
+        }
+      ]
+    }
+  },
+  "performance_opportunities": [
+    {
+      "id": "PERF-CACHE-1",
+      "name": "User Repository Caching",
+      "current_state": "load_user_repos() reads from disk on every call",
+      "optimization": "Implement TTL cache (60 seconds)",
+      "impact": "Reduce I/O operations by 80-90%",
+      "implementation_time": 2.5,
+      "priority": "HIGH"
+    },
+    {
+      "id": "PERF-CACHE-2",
+      "name": "LFS Locks Caching",
+      "current_state": "subprocess called for each document (O(n))",
+      "optimization": "Cache all locks, refresh every 30 seconds",
+      "impact": "Convert O(n) to O(1) subprocess calls",
+      "implementation_time": 3.5,
+      "priority": "HIGH"
+    },
+    {
+      "id": "PERF-ASYNC",
+      "name": "Async subprocess operations",
+      "current_state": "subprocess.run() blocks event loop",
+      "optimization": "Use asyncio.to_thread() for Git operations",
+      "impact": "Improved UI responsiveness",
+      "implementation_time": 4,
+      "priority": "MEDIUM"
+    }
+  ],
+  "quality_improvements": [
+    {
+      "improvement": "Reduce code duplication",
+      "current_duplicated_lines": 256,
+      "target_duplicated_lines": 50,
+      "reduction_percentage": 80,
+      "methods": [
+        "Extract find_document() function",
+        "Create LockManager class",
+        "Create check_admin_rights() function"
+      ]
+    },
+    {
+      "improvement": "Improve maintainability",
+      "changes": [
+        "Unified session management",
+        "Consistent error handling",
+        "Clear separation of concerns"
+      ]
+    },
+    {
+      "improvement": "Enhance security",
+      "changes": [
+        "Centralized permission checking",
+        "Consistent credential handling"
+      ]
+    }
+  ],
+  "testing_recommendations": [
+    {
+      "test_type": "Unit tests",
+      "missing": true,
+      "recommended_coverage": "80%",
+      "priority": "HIGH",
+      "test_areas": [
+        "LockManager class",
+        "find_document() function",
+        "check_admin_rights() function",
+        "Cache invalidation"
+      ]
+    },
+    {
+      "test_type": "Integration tests",
+      "current_status": "Limited",
+      "recommended_areas": [
+        "Document upload workflow",
+        "Lock/unlock workflow",
+        "Git operations",
+        "Multi-user scenarios"
+      ]
+    },
+    {
+      "test_type": "Performance tests",
+      "missing": true,
+      "recommended_metrics": [
+        "Response time for list_documents()",
+        "LFS lock query time",
+        "Cache hit/miss ratio"
+      ]
+    }
+  ],
+  "migration_strategy": [
+    {
+      "step": 1,
+      "description": "Backup current production code",
+      "time_minutes": 5
+    },
+    {
+      "step": 2,
+      "description": "Apply Phase 1 (critical fixes)",
+      "time_hours": 0.5,
+      "risk": "LOW"
+    },
+    {
+      "step": 3,
+      "description": "Apply Phase 2 (refactoring)",
+      "time_hours": 8,
+      "risk": "MEDIUM",
+      "mitigation": "Comprehensive testing before merge"
+    },
+    {
+      "step": 4,
+      "description": "Deploy to staging",
+      "time_hours": 1
+    },
+    {
+      "step": 5,
+      "description": "Apply Phase 3 (optimization)",
+      "time_hours": 7,
+      "risk": "LOW"
+    },
+    {
+      "step": 6,
+      "description": "Final testing and deployment",
+      "time_hours": 2
+    }
+  ]
+}
