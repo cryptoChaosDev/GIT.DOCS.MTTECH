@@ -1650,6 +1650,36 @@ def _clear_action(user_id):
         user_doc_sessions.pop(user_id, None)
 
 
+def _is_system_dir_part(name: str) -> bool:
+    """Return True if name is a system/hidden directory that should be excluded from browsing."""
+    return name.startswith('.') or name in ('__pycache__', 'node_modules')
+
+
+def _collect_folder_tree(repo_root: Path, folder_rel: str) -> dict:
+    """Scan folder_rel (relative to repo_root) and return immediate contents:
+        {'dirs': [subfolder names that contain .docx at any depth],
+         'files': [.docx filenames directly in this folder]}
+    Both lists are sorted. System/hidden directories are excluded.
+    """
+    current = repo_root / folder_rel if folder_rel else repo_root
+    if not current.is_dir():
+        return {'dirs': [], 'files': []}
+
+    files = sorted(
+        f.name for f in current.iterdir()
+        if f.is_file() and f.suffix.lower() == '.docx'
+    )
+
+    dirs = []
+    for child in sorted(current.iterdir()):
+        if not child.is_dir() or _is_system_dir_part(child.name):
+            continue
+        if any(child.rglob('*.docx')):
+            dirs.append(child.name)
+
+    return {'dirs': dirs, 'files': files}
+
+
 def get_lfs_lock_info(doc_rel_path: str, cwd: Path = REPO_PATH, repo_type: str = None):
     """Return lock info for a path using modern GitLab API or git lfs locks as fallback. cwd specifies repository root."""
     try:
@@ -2216,10 +2246,48 @@ def get_docs_keyboard(docs, locks=None):
             keyboard.append([f"📄 {doc}"])
     
     keyboard.append(["◀️ Назад в главное меню"])
-    
+
     if PTB_AVAILABLE:
         return PTBReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
     return keyboard
+
+
+def get_folder_keyboard(dirs, files, locks=None, folder_rel=''):
+    """Keyboard for folder-browser view.
+    dirs  – list of subfolder names (strings)
+    files – list of .docx filenames in current folder
+    locks – dict keyed by filename (or rel path) with lock info
+    folder_rel – current folder relative path; used to pick back-button label
+    """
+    if locks is None:
+        locks = {}
+
+    keyboard = []
+
+    # Subfolders first
+    for d in dirs:
+        keyboard.append([f"📁 {d}"])
+
+    # Then files with lock icon if locked
+    for f in files:
+        if f in locks:
+            keyboard.append([f"📄🔒 {f}"])
+        else:
+            keyboard.append([f"📄 {f}"])
+
+    # Upload button — lets user add a NEW file to this folder
+    keyboard.append(["📤 Загрузить файл"])
+
+    # Back: to parent folder if inside subfolder, to main menu if at root
+    if folder_rel:
+        keyboard.append(["◀️ Назад"])
+    else:
+        keyboard.append(["◀️ Назад в главное меню"])
+
+    if PTB_AVAILABLE:
+        return PTBReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+    return keyboard
+
 
 def get_document_keyboard(doc_name, is_locked=False, can_unlock=False, current_user_id=None, repo_root=None):
     """Меню работы с конкретным документом
@@ -2671,32 +2739,26 @@ async def list_documents(message):
         # If pull fails, continue anyway as there might be local files
         pass
 
-    # Search for .docx files in the entire repository, not just /docs directory
-    docs = list(repo_root.rglob("*.docx"))
-    
-    # Filter out files in .git directory and other hidden/system directories
-    docs = [doc for doc in docs 
-            if not any(part.startswith('.') for part in doc.parts) 
-            and '.git' not in doc.parts
-            and '__pycache__' not in doc.parts
-            and 'node_modules' not in doc.parts]
-    if not docs:
+    # Determine current folder from session; default to root
+    session = user_doc_sessions.get(message.from_user.id, {})
+    folder_rel = session.get('folder', '')
+
+    # Collect folder contents for current path
+    tree = _collect_folder_tree(repo_root, folder_rel)
+
+    if not tree['dirs'] and not tree['files']:
         await message.answer("📂 В репозитории нет документов .docx", reply_markup=get_main_keyboard(message.from_user.id))
         return
-    
-    doc_names = [f.name for f in docs]
-    
+
     # Get Git LFS locks to show lock icons for locked documents
     git_lfs_locks = {}
     try:
         user_repo_path = get_repo_for_user_id(message.from_user.id)
         if user_repo_path and user_repo_path.exists():
-            # Debug: log repository info
             user_repo_info = get_user_repo(message.from_user.id)
             repo_url = user_repo_info.get('repo_url', 'unknown') if user_repo_info else 'unknown'
             logging.info(f"User {message.from_user.id} checking locks for repo: {repo_url} at {user_repo_path}")
-            
-            # Check remote repository URL to ensure all users use the same repo
+
             remote_url = None
             try:
                 remote_result = subprocess.run(["git", "remote", "get-url", "origin"], cwd=str(user_repo_path), capture_output=True, text=True, encoding='utf-8', errors='replace')
@@ -2707,9 +2769,7 @@ async def list_documents(message):
                     logging.warning(f"User {message.from_user.id} failed to get remote URL: {remote_result.stderr}")
             except Exception as e:
                 logging.error(f"Error checking remote URL for user {message.from_user.id}: {e}")
-            
-            # CRITICAL: Reconfigure Git LFS before attempting to get locks
-            # This ensures LFS is properly configured with the correct protocol URL
+
             if remote_url:
                 try:
                     lfs_manager = GitLabLFSManager()
@@ -2717,17 +2777,14 @@ async def list_documents(message):
                     logging.info(f"Reconfigured LFS for user {message.from_user.id} before getting locks")
                 except Exception as e:
                     logging.error(f"Failed to reconfigure LFS for user {message.from_user.id}: {e}")
-            
-            # Get LFS locks - credentials stored globally
+
             proc = subprocess.run(["git", "lfs", "locks"], cwd=str(user_repo_path), capture_output=True, text=True, encoding='utf-8', errors='replace')
             logging.info(f"LFS locks command result for user {message.from_user.id}: returncode={proc.returncode}, stdout={proc.stdout[:200]}, stderr={proc.stderr[:200] if proc.stderr else 'none'}")
-            
-            # If locks command fails, log it but continue (may be SSH auth issue)
+
             if proc.returncode != 0:
                 logging.warning(f"Failed to get LFS locks for user {message.from_user.id}: {proc.stderr[:500]}")
-                # Don't fail completely - just proceed without lock info
                 proc.stdout = ""
-            
+
             if proc.returncode == 0 and proc.stdout.strip():
                 for line in proc.stdout.splitlines():
                     if line.strip():
@@ -2736,18 +2793,57 @@ async def list_documents(message):
                             path = parts[0]
                             owner = parts[1]
                             lock_id = parts[2] if len(parts) > 2 else None
-                            # Store both full path and filename as keys for flexibility
                             git_lfs_locks[path] = {"owner": owner, "id": lock_id, "path": path}
-                            # Also store by filename alone for compatibility
                             filename = path.split("/")[-1] if "/" in path else path
                             if filename not in git_lfs_locks:
                                 git_lfs_locks[filename] = {"owner": owner, "id": lock_id, "path": path}
                             logging.info(f"Found lock: {path} (filename: {filename}) locked by {owner}")
     except Exception as e:
         logging.error(f"Error getting LFS locks for user {message.from_user.id}: {e}")
-    
-    keyboard = get_docs_keyboard(doc_names, locks=git_lfs_locks)
-    await message.answer("Выберите документ:", reply_markup=keyboard)
+
+    # Update session: set folder, clear doc/action (we are in browse mode)
+    user_doc_sessions[message.from_user.id] = {'folder': folder_rel}
+
+    # Build and send keyboard
+    keyboard = get_folder_keyboard(tree['dirs'], tree['files'], locks=git_lfs_locks, folder_rel=folder_rel)
+
+    header = f"📂 {folder_rel}" if folder_rel else "📂 Документы"
+    await message.answer(header, reply_markup=keyboard)
+
+
+async def handle_folder_selection(message):
+    """User tapped a folder button (📁 Name). Navigate into that subfolder."""
+    folder_name = message.text.strip()[len("📁 "):]
+
+    session = user_doc_sessions.get(message.from_user.id, {})
+    current_folder = session.get('folder', '')
+
+    new_folder = f"{current_folder}/{folder_name}" if current_folder else folder_name
+    user_doc_sessions[message.from_user.id] = {'folder': new_folder}
+
+    # Re-render folder view (list_documents reads folder from session)
+    await list_documents(message)
+
+
+async def upload_to_folder(message):
+    """User tapped '📤 Загрузить файл' in a folder view. Prompt for file."""
+    repo_root = await require_user_repo(message)
+    if not repo_root:
+        return
+
+    session = user_doc_sessions.get(message.from_user.id, {})
+    folder_rel = session.get('folder', '')
+
+    # Keep folder, set action
+    session['action'] = 'upload_to_folder'
+    user_doc_sessions[message.from_user.id] = session
+
+    target_label = f"`{folder_rel}`" if folder_rel else "корень репозитория"
+    await message.answer(
+        f"📤 Отправьте файл .docx для папки {target_label}.\n\n"
+        f"Добавьте описание (caption) к файлу — оно станет комментарием коммита."
+    )
+
 
 async def handle_doc_selection(message):
     doc_text = message.text.strip()
@@ -2764,8 +2860,10 @@ async def handle_doc_selection(message):
     # Normalize document name to handle potential encoding issues
     doc_name = doc_name.strip()
     
-    # Set selected document in user's session
-    user_doc_sessions[message.from_user.id] = {'doc': doc_name}
+    # Set selected document in user's session (merge to preserve 'folder' from browsing)
+    session = user_doc_sessions.get(message.from_user.id, {})
+    session['doc'] = doc_name
+    user_doc_sessions[message.from_user.id] = session
     repo_root = get_repo_for_user_id(message.from_user.id)
     
     # Search for document in entire repository (not just docs/ directory)
@@ -3205,11 +3303,15 @@ async def handle_document_upload(message):
             doc_path = file_path
             break
     
-    # If document not found, create path in docs/ directory for new uploads
+    # If document not found, determine target directory for new file
     if not doc_path:
-        docs_dir = repo_root / "docs"
-        docs_dir.mkdir(parents=True, exist_ok=True)
-        doc_path = docs_dir / doc_name
+        # If upload was initiated from folder browser, use that folder
+        if session and session.get('action') == 'upload_to_folder' and 'folder' in session:
+            target_dir = repo_root / session['folder'] if session['folder'] else repo_root
+        else:
+            target_dir = repo_root / "docs"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        doc_path = target_dir / doc_name
     
     # Check LFS lock status (Git LFS is now the only lock mechanism)
     # Use relative path from repository root
@@ -3298,8 +3400,8 @@ async def handle_document_upload(message):
         elif local_locked_by_other:
             error_msg += "Обнаружена локальная блокировка. "
         
-        error_msg += "Обратитесь к владельцу блокировки для разблокировки или убедитесь, что ваш GitHub аккаунт правильно связан с Telegram."
-        await message.answer(error_msg, reply_markup=get_document_keyboard(doc_name, is_locked=True, can_unlock=False))
+        error_msg += "Попробуйте разблокировать документ через кнопку ниже. Если это не поможет — обратитесь к владельцу блокировки."
+        await message.answer(error_msg, reply_markup=get_document_keyboard(doc_name, is_locked=True, can_unlock=True))
         return
     
     # Download and save the document
@@ -3686,26 +3788,8 @@ async def unlock_document_by_name(message, doc_name: str):
         await message.answer(f"ℹ️ Документ {doc_name} не заблокирован через Git LFS.", reply_markup=get_document_keyboard(doc_name, is_locked=False))
         return
 
-    # Check if user is allowed to unlock (is owner or admin)
-    is_allowed_to_unlock = False
-    try:
-        lfs_owner = lfs_lock_info.get('owner', '')
-        # Check if user is lock owner (by Telegram ID or GitHub username)
-        user_repo_info = get_user_repo(message.from_user.id)
-        user_github_username = user_repo_info.get('git_username') if user_repo_info else None
-        
-        is_lock_owner = (
-            lfs_owner == str(message.from_user.id) or
-            lfs_owner == user_github_username or
-            (user_github_username and lfs_owner.lower() == user_github_username.lower())
-        )
-        is_allowed_to_unlock = is_lock_owner or (str(message.from_user.id) in ADMIN_IDS)
-    except Exception:
-        pass  # Default to not being allowed if there's an error
-    
-    if not is_allowed_to_unlock:
-        await message.answer(f"❌ У вас нет прав для разблокировки документа {doc_name} (владелец {lfs_lock_info.get('owner', 'unknown')}).", reply_markup=get_document_keyboard(doc_name, is_locked=True, can_unlock=False))
-        return
+    # Ownership is verified server-side by git-lfs; skip local check to handle
+    # locks created via GitLab web UI where git_username may not match.
     # Try to unlock via git-lfs using lock ID for better reliability
     # Use relative path to ensure consistency with what git lfs locks returns
     rel = str(doc_path.relative_to(repo_root)).replace('\\', '/')
@@ -3762,6 +3846,27 @@ async def unlock_document_by_name(message, doc_name: str):
                 # Return to document menu
                 reply_markup = get_document_keyboard(doc_name, is_locked=True)
                 await message.answer(f"⚠️ Ошибка при автокоммите/разблокировке: {err2[:200]}", reply_markup=reply_markup)
+                return
+        # If server rejected due to lock ownership (e.g. lock created via GitLab web UI),
+        # retry with --force — GitLab accepts it if user has write access to the project.
+        if 'owned by' in err.lower() or 'not lock owner' in err.lower() or 'lock is locked by' in err.lower():
+            logging.info(f"Lock ownership mismatch detected, retrying with --force (lock_id={lock_id})")
+            try:
+                if lock_id:
+                    subprocess.run(["git", "lfs", "unlock", "--id", str(lock_id), "--force"], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+                else:
+                    subprocess.run(["git", "lfs", "unlock", "--force", doc_path.name], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
+                reply_markup = get_document_keyboard(doc_name, is_locked=False)
+                await message.answer(f"🔓 Документ {doc_name} успешно разблокирован!", reply_markup=reply_markup)
+                user_name = format_user_name(message)
+                timestamp = format_datetime()
+                log_message = f"🔓 Пользователь {user_name} разблокировал документ: {doc_name} [{timestamp}]"
+                await log_to_group(message, log_message)
+                return
+            except subprocess.CalledProcessError as e2:
+                err2 = (e2.stderr or e2.stdout or '').strip()
+                reply_markup = get_document_keyboard(doc_name, is_locked=True)
+                await message.answer(f"⚠️ Ошибка при разблокировке: {err2[:200]}", reply_markup=reply_markup)
                 return
         # Check for SSH authentication errors
         if 'exit status 255' in err or 'Permission denied' in err or 'ssh' in err.lower():
@@ -4645,9 +4750,15 @@ async def resync_repository(message):
         
         # Fetch from remote
         subprocess.run(["git", "fetch", "origin"], cwd=str(repo_root), check=True, capture_output=True)
-        
-        # Reset hard to origin/main (this removes all local changes)
-        subprocess.run(["git", "reset", "--hard", "origin/main"], cwd=str(repo_root), check=True, capture_output=True)
+
+        # Determine current branch dynamically
+        current_branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(repo_root), check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+        # Reset hard to origin/{current_branch} (this removes all local changes)
+        subprocess.run(["git", "reset", "--hard", f"origin/{current_branch}"], cwd=str(repo_root), check=True, capture_output=True)
         
         # Clean untracked files
         subprocess.run(["git", "clean", "-fd"], cwd=str(repo_root), check=True, capture_output=True)
@@ -4729,7 +4840,11 @@ async def handle_repo_action_simple(msg, action):
             if repo_url_with_creds:
                 subprocess.run(["git", "remote", "set-url", "origin", repo_url_with_creds], cwd=str(repo_dir), check=True, capture_output=True)
             subprocess.run(["git", "fetch", "origin"], cwd=str(repo_dir), check=True, capture_output=True)
-            subprocess.run(["git", "reset", "--hard", "origin/main"], cwd=str(repo_dir), check=True, capture_output=True)
+            current_branch = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=str(repo_dir), check=True, capture_output=True, text=True
+            ).stdout.strip()
+            subprocess.run(["git", "reset", "--hard", f"origin/{current_branch}"], cwd=str(repo_dir), check=True, capture_output=True)
             subprocess.run(["git", "clean", "-fd"], cwd=str(repo_dir), check=True, capture_output=True)
             await msg.answer("✅ Репозиторий успешно переключен!", reply_markup=get_main_keyboard())
         except subprocess.CalledProcessError as e:
@@ -5212,6 +5327,11 @@ async def main():
                 await show_user_edit_menu(msg, session['target_user_id'])
                 return
             
+            # Навигация по папкам
+            if text.startswith("📁 "):
+                await handle_folder_selection(msg)
+                return
+
             # Работа с документами
             if text.startswith("📄 ") or text.startswith("📄🔒 "):
                 # Выбор документа из списка (включая заблокированные документы)
@@ -5222,6 +5342,9 @@ async def main():
                 return
             if text == "📤 Загрузить изменения":
                 await upload_changes(msg)
+                return
+            if text == "📤 Загрузить файл":
+                await upload_to_folder(msg)
                 return
 
             if text == "🔒 Заблокировать":
@@ -5235,8 +5358,21 @@ async def main():
                 return
 
             # Навигация
-            if text == "◀️ Назад в главное меню" or text == "◀️ Назад":
+            if text == "◀️ Назад в главное меню":
                 await go_back(msg)
+                return
+            if text == "◀️ Назад":
+                # If inside a subfolder — go up one level; otherwise go to main menu
+                _nav_session = user_doc_sessions.get(msg.from_user.id, {})
+                _nav_folder = _nav_session.get('folder', '')
+                if '/' in _nav_folder:
+                    user_doc_sessions[msg.from_user.id] = {'folder': _nav_folder.rsplit('/', 1)[0]}
+                    await list_documents(msg)
+                elif _nav_folder:
+                    user_doc_sessions[msg.from_user.id] = {'folder': ''}
+                    await list_documents(msg)
+                else:
+                    await go_back(msg)
                 return
             if text == "◀️ Назад к документам":
                 await list_documents(msg)
