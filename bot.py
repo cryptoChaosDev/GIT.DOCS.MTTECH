@@ -2289,36 +2289,9 @@ def get_folder_keyboard(dirs, files, locks=None, folder_rel=''):
     return keyboard
 
 
-def get_document_keyboard(doc_name, is_locked=False, can_unlock=False, current_user_id=None, repo_root=None):
-    """Меню работы с конкретным документом
-    
-    Args:
-        doc_name: Name of the document
-        is_locked: Whether document is locked
-        can_unlock: Whether current user can unlock the document
-        current_user_id: Current user's Telegram ID (for upload permission check)
-        repo_root: Repository root path (for lock verification)
-    """
-    # Check if current user can upload (is lock owner)
-    can_upload = False
-    if is_locked and current_user_id and repo_root:
-        # Check if user is the lock owner via Git LFS
-        try:
-            rel_path = str((Path('docs') / doc_name).as_posix())
-            lfs_lock_info = get_lfs_lock_info(rel_path, cwd=repo_root)
-            if lfs_lock_info:
-                # Get user's GitHub username
-                user_repo_info = get_user_repo(current_user_id)
-                user_github_username = user_repo_info.get('git_username') if user_repo_info else None
-                
-                # Check if LFS lock owner matches user's GitHub username
-                lfs_owner = lfs_lock_info.get('owner')
-                if (lfs_owner == str(current_user_id) or 
-                    lfs_owner == user_github_username or
-                    (user_github_username and lfs_owner.lower() == user_github_username.lower())):
-                    can_upload = True
-        except Exception:
-            pass
+def get_document_keyboard(doc_name, is_locked=False, can_unlock=False, is_lock_owner=False):
+    """Меню работы с конкретным документом"""
+    can_upload = is_lock_owner
     
     if PTB_AVAILABLE:
         # Build keyboard with conditional upload button
@@ -2911,8 +2884,7 @@ async def handle_doc_selection(message):
         except Exception:
             can_unlock = False
             
-        reply_markup = get_document_keyboard(doc_name, is_locked=True, can_unlock=can_unlock, 
-                                           current_user_id=message.from_user.id, repo_root=repo_root)
+        reply_markup = get_document_keyboard(doc_name, is_locked=True, can_unlock=can_unlock, is_lock_owner=is_lock_owner)
 
         # Load user repos to find Telegram username
         user_repos = load_user_repos()
@@ -2946,7 +2918,9 @@ async def handle_doc_selection(message):
             f"👤 Пользователь: {owner_display}\n"
             f"🕐 Время блокировки: {lock_timestamp}\n"
             "\n"
-            "Вы можете скачать документ, но не сможете загрузить изменения, пока он заблокирован."
+            ("Вы можете скачать и загрузить изменения. После загрузки блокировка снимется автоматически."
+             if is_lock_owner else
+             "Вы можете скачать документ, но не сможете загрузить изменения, пока он заблокирован.")
         )
         await message.answer(message_text, reply_markup=reply_markup)
     else:
@@ -3568,23 +3542,12 @@ async def handle_document_upload(message):
             logging.info(f"No staged changes for {doc_name} - skipping commit")
         
         # Push to remote only if commit was created
+        lock_was_released = False
         if commit_created:
-            # Check if file is locked by LFS and unlock it temporarily if needed
-            # Use relative path from repository root
+            # Check if file is locked by LFS (to release after push)
             rel_path = str(doc_path.relative_to(repo_root)).replace('\\', '/')
             lfs_lock_info = get_lfs_lock_info(rel_path, cwd=repo_root)
-            
-            # If file is locked by current user, unlock it temporarily for push
-            if lfs_lock_info and lfs_lock_info.get('owner') == str(message.from_user.id):
-                try:
-                    # Use only filename to avoid protocol issues
-                    temp_filename = Path(rel_path).name
-                    subprocess.run(["git", "lfs", "unlock", temp_filename], cwd=str(repo_root), check=True, capture_output=True)
-                    logging.info(f"Temporarily unlocked {doc_name} for push")
-                except subprocess.CalledProcessError:
-                    # If unlock fails, continue anyway - might not be critical
-                    pass
-            
+
             # Push LFS objects first (only current branch)
             try:
                 lfs_push_result = subprocess.run(["git", "lfs", "push", "origin", "HEAD"],
@@ -3597,18 +3560,22 @@ async def handle_document_upload(message):
             # Then push commits
             try:
                 subprocess.run(["git", "push"], cwd=str(repo_root), check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
-                
-                # Re-lock the file after successful push if it was unlocked
-                if lfs_lock_info and lfs_lock_info.get('owner') == str(message.from_user.id):
+
+                # Release lock after successful push
+                if lfs_lock_info:
                     try:
-                        # Use only filename to avoid protocol issues
-                        temp_filename = Path(rel_path).name
-                        subprocess.run(["git", "lfs", "lock", temp_filename], cwd=str(repo_root), check=True, capture_output=True)
-                        logging.info(f"Re-locked {doc_name} after push")
+                        lock_id = lfs_lock_info.get('id')
+                        if lock_id:
+                            subprocess.run(["git", "lfs", "unlock", "--force", "--id", str(lock_id)],
+                                         cwd=str(repo_root), check=True, capture_output=True)
+                        else:
+                            subprocess.run(["git", "lfs", "unlock", "--force", rel_path],
+                                         cwd=str(repo_root), check=True, capture_output=True)
+                        lock_was_released = True
+                        logging.info(f"Released lock on {doc_name} after successful upload")
                     except subprocess.CalledProcessError:
-                        # If re-lock fails, continue - file will remain unlocked
                         pass
-                        
+
             except subprocess.CalledProcessError as e:
                 err_msg = (e.stderr or e.stdout or '').strip()
                 if isinstance(err_msg, bytes):
@@ -3634,13 +3601,10 @@ async def handle_document_upload(message):
         
         if old_hash or new_hash:
             summary += f"\n• Old SHA256: `{old_hash}` size={old_size if old_size else 'unknown'}`\n• New SHA256: `{new_hash}` size={new_size if new_size else 'unknown'}`"
-        # Add unlock suggestion (user may choose to unlock explicitly)
-        summary += "\n\nЕсли хотите, нажмите \"🔓 Разблокировать\" чтобы снять блокировку (если есть)."
+        if lock_was_released:
+            summary += "\n\n🔓 Блокировка снята автоматически после загрузки."
 
-        # Return to document menu after upload
-        # doc_name is already set correctly (either from session or from uploaded file name)
-        # Check if document is locked via Git LFS
-        # Use relative path from repository root
+        # Return to document menu after upload — re-check lock (should be gone after auto-release)
         rel_path = str(doc_path.relative_to(repo_root)).replace('\\', '/')
         try:
             lfs_lock_info = get_lfs_lock_info(rel_path, cwd=repo_root)
@@ -3648,16 +3612,15 @@ async def handle_document_upload(message):
         except Exception as e:
             logging.warning(f"Failed to get LFS lock info for {doc_name}: {e}")
             is_locked = False
-        
-        # Check if user can unlock (is owner or admin)
+
+        is_lock_owner = False
         can_unlock = False
         if is_locked and lfs_lock_info:
             try:
                 lfs_owner = lfs_lock_info.get('owner', '')
-                # Check if user is lock owner (by Telegram ID or GitHub username)
                 user_repo_info = get_user_repo(message.from_user.id)
                 user_github_username = user_repo_info.get('git_username') if user_repo_info else None
-                
+
                 is_lock_owner = (
                     lfs_owner == str(message.from_user.id) or
                     lfs_owner == user_github_username or
@@ -3666,10 +3629,9 @@ async def handle_document_upload(message):
                 can_unlock = is_lock_owner or (str(message.from_user.id) in ADMIN_IDS)
             except Exception:
                 can_unlock = False
-        reply_markup = get_document_keyboard(doc_name, is_locked=is_locked, can_unlock=can_unlock,
-                                           current_user_id=message.from_user.id, repo_root=repo_root)
+        reply_markup = get_document_keyboard(doc_name, is_locked=is_locked, can_unlock=can_unlock, is_lock_owner=is_lock_owner)
         await message.answer(summary, reply_markup=reply_markup)
-        
+
         # Log document upload
         user_name = format_user_name(message)
         timestamp = format_datetime()
@@ -3680,19 +3642,9 @@ async def handle_document_upload(message):
         session = user_doc_sessions.get(message.from_user.id)
         if session:
             session.pop('action', None)
-            # Ensure doc_name is set in session
             session['doc'] = doc_name
         else:
             user_doc_sessions[message.from_user.id] = {'doc': doc_name}
-
-        # Auto-unlock after upload if configured
-        if AUTO_UNLOCK_ON_UPLOAD:
-            try:
-                # call unlock flow (owner should be uploader)
-                await unlock_document_by_name(message, doc_name)
-            except Exception:
-                # don't fail on auto-unlock errors
-                pass
     except subprocess.CalledProcessError as e:
         # This should not be reached if we handle errors above, but keep as fallback
         err_msg = ''
