@@ -4098,7 +4098,7 @@ async def check_lock_status(message):
                 logging.warning(f"Failed to get locks via GitLab API: {e}")
         
         # Fallback to git-lfs locks command (may show deprecation warning)
-        proc = subprocess.run(["git", "lfs", "locks"], cwd=str(repo_root), capture_output=True, text=True, encoding='utf-8', errors='replace')
+        proc = subprocess.run(["git", "lfs", "locks", "--all"], cwd=str(repo_root), capture_output=True, text=True, encoding='utf-8', errors='replace')
         
         # Log deprecation warning if present
         if proc.stderr and "deprecated" in proc.stderr.lower():
