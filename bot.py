@@ -4063,15 +4063,36 @@ async def check_lock_status(message):
             try:
                 lock_status = get_lock_info_via_gitlab_api(None, repo_root)  # None means get all locks
                 if lock_status:
-                    # Format the output nicely
-                    formatted_output = ""
+                    active_locks = ""
+                    stale_locks = []
                     for lock in lock_status:
                         path = lock.get('path', 'unknown')
                         owner = lock.get('user', {}).get('username', 'unknown')
                         timestamp = lock.get('created_at', '')
-                        formatted_output += f"📄 {path}\n   👤 {owner}\n   🕐 {timestamp}\n\n"
-                    
-                    await message.answer(f"🔒 Активные блокировки:\n\n{formatted_output}", reply_markup=get_locks_keyboard(user_id=message.from_user.id))
+                        lock_id = lock.get('id')
+                        if (repo_root / path).exists():
+                            active_locks += f"📄 {path}\n   👤 {owner}\n   🕐 {timestamp}\n\n"
+                        else:
+                            stale_locks.append({'id': lock_id, 'path': path, 'owner': owner})
+
+                    # Auto-unlock stale locks (file no longer in repo)
+                    cleaned = []
+                    for stale in stale_locks:
+                        if stale['id']:
+                            try:
+                                subprocess.run(["git", "lfs", "unlock", "--force", "--id", str(stale['id'])],
+                                             cwd=str(repo_root), check=True, capture_output=True, text=True)
+                                cleaned.append(stale)
+                                logging.info(f"Auto-cleaned stale lock ID:{stale['id']} for {stale['path']}")
+                            except subprocess.CalledProcessError as unlock_err:
+                                logging.warning(f"Failed to auto-unlock stale lock ID:{stale['id']}: {unlock_err.stderr}")
+
+                    msg_text = f"🔒 Активные блокировки:\n\n{active_locks}" if active_locks else "🔓 Нет активных блокировок\n\n"
+                    if cleaned:
+                        cleaned_list = "\n".join(f"   📄 {s['path']} (ID:{s['id']})" for s in cleaned)
+                        msg_text += f"\n🗑️ Очищены устаревшие блокировки (файл удалён из репозитория):\n{cleaned_list}\n"
+
+                    await message.answer(msg_text, reply_markup=get_locks_keyboard(user_id=message.from_user.id))
                     return
             except Exception as e:
                 logging.warning(f"Failed to get locks via GitLab API: {e}")
@@ -4087,21 +4108,42 @@ async def check_lock_status(message):
         if not out:
             await message.answer("🔓 Нет активных блокировок", reply_markup=get_locks_keyboard(user_id=message.from_user.id))
             return
-            
-        # Format the output nicely
-        formatted_output = ""
+
+        # Parse locks and separate active vs stale (file deleted from repo)
+        active_locks = ""
+        stale_locks = []
         for line in out.splitlines():
             if line.strip():
                 parts = line.strip().split()
                 if len(parts) >= 2:
                     path = parts[0]
                     owner = parts[1]
-                    timestamp = parts[2] if len(parts) > 2 else ""
-                    formatted_output += f"📄 {path}\n   👤 {owner}\n   🕐 {timestamp}\n\n"
-                else:
-                    formatted_output += f"{line}\n"
-        
-        await message.answer(f"🔒 Активные блокировки:\n\n{formatted_output}", reply_markup=get_locks_keyboard(user_id=message.from_user.id))
+                    lock_id = None
+                    if len(parts) > 2 and parts[2].startswith('ID:'):
+                        lock_id = parts[2][3:]
+                    if (repo_root / path).exists():
+                        active_locks += f"📄 {path}\n   👤 {owner}\n   🕐 ID:{lock_id}\n\n"
+                    else:
+                        stale_locks.append({'id': lock_id, 'path': path, 'owner': owner})
+
+        # Auto-unlock stale locks
+        cleaned = []
+        for stale in stale_locks:
+            if stale['id']:
+                try:
+                    subprocess.run(["git", "lfs", "unlock", "--force", "--id", str(stale['id'])],
+                                 cwd=str(repo_root), check=True, capture_output=True, text=True)
+                    cleaned.append(stale)
+                    logging.info(f"Auto-cleaned stale lock ID:{stale['id']} for {stale['path']}")
+                except subprocess.CalledProcessError as unlock_err:
+                    logging.warning(f"Failed to auto-unlock stale lock ID:{stale['id']}: {unlock_err.stderr}")
+
+        msg_text = f"🔒 Активные блокировки:\n\n{active_locks}" if active_locks else "🔓 Нет активных блокировок\n\n"
+        if cleaned:
+            cleaned_list = "\n".join(f"   📄 {s['path']} (ID:{s['id']})" for s in cleaned)
+            msg_text += f"\n🗑️ Очищены устаревшие блокировки (файл удалён из репозитория):\n{cleaned_list}\n"
+
+        await message.answer(msg_text, reply_markup=get_locks_keyboard(user_id=message.from_user.id))
         
         # Log lock status check
         user_name = format_user_name(message)
