@@ -3603,31 +3603,38 @@ async def handle_document_upload(message):
         if lock_was_released:
             summary += "\n\n🔓 Блокировка снята автоматически после загрузки."
 
-        # Return to document menu after upload — re-check lock (should be gone after auto-release)
-        rel_path = str(doc_path.relative_to(repo_root)).replace('\\', '/')
-        try:
-            lfs_lock_info = get_lfs_lock_info(rel_path, cwd=repo_root)
-            is_locked = lfs_lock_info is not None
-        except Exception as e:
-            logging.warning(f"Failed to get LFS lock info for {doc_name}: {e}")
+        # Return to document menu after upload
+        if lock_was_released:
+            # Lock was just released — no need to re-query, state is known
             is_locked = False
-
-        is_lock_owner = False
-        can_unlock = False
-        if is_locked and lfs_lock_info:
+            is_lock_owner = False
+            can_unlock = False
+        else:
+            # Re-check lock status from server
+            rel_path = str(doc_path.relative_to(repo_root)).replace('\\', '/')
             try:
-                lfs_owner = lfs_lock_info.get('owner', '')
-                user_repo_info = get_user_repo(message.from_user.id)
-                user_github_username = user_repo_info.get('git_username') if user_repo_info else None
+                lfs_lock_info = get_lfs_lock_info(rel_path, cwd=repo_root)
+                is_locked = lfs_lock_info is not None
+            except Exception as e:
+                logging.warning(f"Failed to get LFS lock info for {doc_name}: {e}")
+                is_locked = False
 
-                is_lock_owner = (
-                    lfs_owner == str(message.from_user.id) or
-                    lfs_owner == user_github_username or
-                    (user_github_username and lfs_owner.lower() == user_github_username.lower())
-                )
-                can_unlock = is_lock_owner or (str(message.from_user.id) in ADMIN_IDS)
-            except Exception:
-                can_unlock = False
+            is_lock_owner = False
+            can_unlock = False
+            if is_locked and lfs_lock_info:
+                try:
+                    lfs_owner = lfs_lock_info.get('owner', '')
+                    user_repo_info = get_user_repo(message.from_user.id)
+                    user_github_username = user_repo_info.get('git_username') if user_repo_info else None
+
+                    is_lock_owner = (
+                        lfs_owner == str(message.from_user.id) or
+                        lfs_owner == user_github_username or
+                        (user_github_username and lfs_owner.lower() == user_github_username.lower())
+                    )
+                    can_unlock = is_lock_owner or (str(message.from_user.id) in ADMIN_IDS)
+                except Exception:
+                    can_unlock = False
         reply_markup = get_document_keyboard(doc_name, is_locked=is_locked, can_unlock=can_unlock, is_lock_owner=is_lock_owner)
         await message.answer(summary, reply_markup=reply_markup)
 
