@@ -4097,13 +4097,21 @@ async def check_lock_status(message):
             except Exception as e:
                 logging.warning(f"Failed to get locks via GitLab API: {e}")
         
-        # Fallback to git-lfs locks command (may show deprecation warning)
-        proc = subprocess.run(["git", "lfs", "locks", "--all"], cwd=str(repo_root), capture_output=True, text=True, encoding='utf-8', errors='replace')
-        
-        # Log deprecation warning if present
-        if proc.stderr and "deprecated" in proc.stderr.lower():
-            logging.info(f"Git LFS API deprecation notice: {proc.stderr.strip()}")
-        
+        # Configure LFS (SSH key / lfs.url) before querying locks
+        try:
+            remote_result = subprocess.run(["git", "remote", "get-url", "origin"], cwd=str(repo_root), capture_output=True, text=True, encoding='utf-8', errors='replace')
+            if remote_result.returncode == 0:
+                remote_url = remote_result.stdout.strip()
+                lfs_manager = GitLabLFSManager()
+                lfs_manager.configure_gitlab_lfs(str(repo_root), remote_url)
+                logging.info(f"Configured LFS for check_lock_status in {repo_root}")
+        except Exception as e:
+            logging.warning(f"Failed to configure LFS before lock status check: {e}")
+
+        # Fallback to git-lfs locks command (default shows all users' locks)
+        proc = subprocess.run(["git", "lfs", "locks"], cwd=str(repo_root), capture_output=True, text=True, encoding='utf-8', errors='replace')
+        logging.info(f"check_lock_status git lfs locks: rc={proc.returncode}, stdout={proc.stdout[:300]}, stderr={proc.stderr[:200] if proc.stderr else 'none'}")
+
         out = (proc.stdout or "").strip()
         if not out:
             await message.answer("🔓 Нет активных блокировок", reply_markup=get_locks_keyboard(user_id=message.from_user.id))
